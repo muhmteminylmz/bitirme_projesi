@@ -5,6 +5,7 @@ Uses mocked ``wbgapi`` to validate data fetching, error handling, and
 country code mapping without requiring internet access.
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -12,6 +13,7 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pandas as pd
 import pytest
+from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -83,8 +85,6 @@ class TestWorldBankFetcher:
 
     def test_json_decode_error_returns_empty(self):
         """A JSONDecodeError from the API should be caught gracefully."""
-        import json
-
         mock_wb = MagicMock()
         mock_wb.data.DataFrame.side_effect = json.JSONDecodeError("Expecting value", "", 0)
 
@@ -97,8 +97,6 @@ class TestWorldBankFetcher:
 
     def test_requests_json_decode_error_returns_empty(self):
         """A requests.exceptions.JSONDecodeError should be caught gracefully."""
-        from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
-
         mock_wb = MagicMock()
         mock_wb.data.DataFrame.side_effect = RequestsJSONDecodeError(
             "Expecting value", "", 0
