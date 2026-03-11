@@ -127,6 +127,11 @@ class WorldBankFetcher:
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             logger.warning("Failed to fetch WB indicator %s: %s", indicator_code, exc)
             return pd.DataFrame(columns=["country", "year", col_name])
+        except Exception as exc:
+            logger.warning(
+                "Unexpected error fetching WB indicator %s: %s", indicator_code, exc
+            )
+            return pd.DataFrame(columns=["country", "year", col_name])
 
     def fetch_all(self) -> pd.DataFrame:
         """
