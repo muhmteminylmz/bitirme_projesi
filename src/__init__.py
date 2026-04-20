@@ -1,1 +1,1 @@
-# Twin Transition Project - Source Package
+"""CBAM hybrid forecasting package."""
