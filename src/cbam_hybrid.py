@@ -7,21 +7,10 @@ from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-try:
-    import tensorflow as tf
-    from tensorflow.keras import Sequential
-    from tensorflow.keras.layers import Dense
-except Exception as exc:  # pragma: no cover - import guard for runtime environment
-    raise ImportError(
-        "TensorFlow is required for Module 4 (MLP). Install dependencies from requirements.txt"
-    ) from exc
-
 
 TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEA"
@@ -38,6 +27,13 @@ class PipelineResult:
 
 def fetch_market_data(period: str = "5y") -> pd.DataFrame:
     """Download target and exogenous market data from yfinance."""
+    try:
+        import yfinance as yf
+    except Exception as exc:  # pragma: no cover - runtime import guard
+        raise ImportError(
+            "yfinance is required for Module 1. Install dependencies from requirements.txt"
+        ) from exc
+
     tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
     data = yf.download(tickers=tickers, period=period, interval="1d", progress=False)
     close = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
@@ -121,6 +117,15 @@ def build_residual_training_frame(x1_train: pd.Series, residuals: pd.Series) -> 
 
 def train_mlp(X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 80, batch_size: int = 16):
     """Train TensorFlow/Keras MLP model."""
+    try:
+        import tensorflow as tf
+        from tensorflow.keras import Sequential
+        from tensorflow.keras.layers import Dense
+    except Exception as exc:  # pragma: no cover - runtime import guard
+        raise ImportError(
+            "TensorFlow is required for Module 4 (MLP). Install dependencies from requirements.txt"
+        ) from exc
+
     tf.random.set_seed(42)
     np.random.seed(42)
 
