@@ -248,15 +248,15 @@ def plot_module_6_visualizations(
     # Grafik 2: Test seti tahmin çizgileri
     axes[1].plot(y_test.index, y_test.values, label="Gerçek Y", color="black", linewidth=2.6)
     for col in predictions_df.columns:
-        axes[1].plot(y_test.index, predictions_df[col].reindex(y_test.index).values, label=col, linewidth=1.8)
+        axes[1].plot(y_test.index, predictions_df[col].values, label=col, linewidth=1.8)
     axes[1].set_title("Grafik 2 - Test Seti Üzerinde Zaman Serisi Tahminleri", fontsize=14)
     axes[1].set_xlabel("Tarih")
     axes[1].set_ylabel("Y (Ölçeklenmiş/Durağanlaştırılmış)")
     axes[1].legend(loc="best")
 
     # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost)
-    hybrid_residual = y_test - predictions_df["Hibrit ARIMAX-MLP"].reindex(y_test.index)
-    xgb_residual = y_test - predictions_df["XGBoost"].reindex(y_test.index)
+    hybrid_residual = y_test - predictions_df["Hibrit ARIMAX-MLP"]
+    xgb_residual = y_test - predictions_df["XGBoost"]
     sns.kdeplot(hybrid_residual, fill=True, alpha=0.35, label="Hibrit ARIMAX-MLP Residual", ax=axes[2], color="#8b0000")
     sns.kdeplot(xgb_residual, fill=True, alpha=0.35, label="XGBoost Residual", ax=axes[2], color="#4c78a8")
     axes[2].axvline(0, linestyle="--", color="black", linewidth=1.2)
