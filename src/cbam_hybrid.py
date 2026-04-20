@@ -27,6 +27,7 @@ MODEL_COLORS = {
     "XGBoost": "#72b7b2",
     "Hibrit ARIMAX-MLP": "#8b0000",
 }
+DEFAULT_MODEL_COLOR = "#808080"
 
 
 @dataclass
@@ -242,7 +243,7 @@ def plot_module_6_visualizations(
     fig, axes = plt.subplots(3, 1, figsize=PLOT_FIGSIZE, gridspec_kw={"height_ratios": PLOT_HEIGHT_RATIOS})
 
     # Grafik 1: RMSE bar chart
-    bar_colors = [MODEL_COLORS.get(model, "#808080") for model in metrics_df["Model"]]
+    bar_colors = [MODEL_COLORS.get(model, DEFAULT_MODEL_COLOR) for model in metrics_df["Model"]]
     sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=axes[0])
     axes[0].set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
     axes[0].set_xlabel("Model")
@@ -273,7 +274,7 @@ def plot_module_6_visualizations(
         alpha=0.35,
         label="XGBoost Residual",
         ax=axes[2],
-        color="#4c78a8",
+        color=MODEL_COLORS["XGBoost"],
     )
     axes[2].axvline(0, linestyle="--", color="black", linewidth=1.2)
     axes[2].set_title("Grafik 3 - Residual Dağılımı (Gerçek - Tahmin)", fontsize=14)
