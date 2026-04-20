@@ -94,10 +94,13 @@ def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8):
 
 def fit_arimax(y_train: pd.Series, x2_train: pd.Series):
     """Fit ARIMAX model with X2 as exogenous variable."""
+    y_train_reset = y_train.reset_index(drop=True)
+    x2_train_reset = x2_train.reset_index(drop=True)
+
     model = SARIMAX(
-        y_train,
-        exog=x2_train,
-        order=(1, 0, 1),
+        y_train_reset,
+        exog=x2_train_reset,
+        order=(1, 1, 1),
         trend="c",
         enforce_stationarity=False,
         enforce_invertibility=False,
@@ -115,12 +118,13 @@ def build_residual_training_frame(x1_train: pd.Series, residuals: pd.Series) -> 
     return X, y
 
 
-def train_mlp(X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 80, batch_size: int = 16):
+def train_mlp(X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 200, batch_size: int = 16):
     """Train TensorFlow/Keras MLP model."""
     try:
         import tensorflow as tf
         from tensorflow.keras import Sequential
-        from tensorflow.keras.layers import Dense
+        from tensorflow.keras.callbacks import EarlyStopping
+        from tensorflow.keras.layers import Dense, Dropout, Input
     except ImportError as exc:  # pragma: no cover - runtime import guard
         raise ImportError(
             "TensorFlow is required for Module 4 (MLP). Install dependencies from requirements.txt"
@@ -131,13 +135,27 @@ def train_mlp(X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 80, batch
 
     model = Sequential(
         [
-            Dense(32, activation="relu", input_shape=(2,)),
+            Input(shape=(2,)),
+            Dense(64, activation="relu"),
+            Dropout(0.2),
+            Dense(32, activation="relu"),
+            Dropout(0.2),
             Dense(16, activation="relu"),
+            Dropout(0.2),
             Dense(1),
         ]
     )
     model.compile(optimizer="adam", loss="mse")
-    model.fit(X_train.values, y_train.values, epochs=epochs, batch_size=batch_size, verbose=0)
+    early_stopping = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
+    model.fit(
+        X_train.values,
+        y_train.values,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_split=0.2,
+        callbacks=[early_stopping],
+        verbose=0,
+    )
     return model
 
 
@@ -172,10 +190,14 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
     x2_train, x2_test = train_df["X2_TIO"], test_df["X2_TIO"]
 
     arimax_fit = fit_arimax(y_train, x2_train)
-    arimax_test_pred = arimax_fit.get_forecast(steps=len(y_test), exog=x2_test).predicted_mean
+    arimax_test_pred = arimax_fit.get_forecast(
+        steps=len(y_test),
+        exog=x2_test.reset_index(drop=True),
+    ).predicted_mean
+    arimax_test_pred = pd.Series(arimax_test_pred.to_numpy(), index=y_test.index, name="arimax_test_pred")
 
     print("\n=== Modül 3: ARIMAX Residual Çıkarımı ===")
-    fitted_train = arimax_fit.fittedvalues.reindex(y_train.index)
+    fitted_train = pd.Series(arimax_fit.fittedvalues.to_numpy(), index=y_train.index, name="arimax_fitted")
     residuals_train = (y_train - fitted_train).dropna()
 
     print("\n=== Modül 4: MLP ile Residual Modelleme ===")
