@@ -18,13 +18,14 @@ Model:
 
 ## Notebook Yapısı
 
-Notebook/Colab akışı 5 modül içerir:
+Notebook/Colab akışı 6 modül içerir:
 
 1. Veri çekme, ffill/bfill, MinMax, ADF/diff
 2. ARIMAX eğitimi ve test tahmini
 3. Eğitim residual çıkarımı
 4. TensorFlow/Keras MLP eğitimi
-5. Hibrit birleşim ve RMSE karşılaştırması
+5. Benchmark modelleri (Baseline + XGBoost), hibrit birleşim ve RMSE/MAE/MAPE karşılaştırması
+6. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı)
 
 ## Kurulum
 
