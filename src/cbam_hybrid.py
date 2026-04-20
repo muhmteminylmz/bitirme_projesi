@@ -224,12 +224,13 @@ def plot_module_6_visualizations(
     y_test: pd.Series,
     predictions_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
+    residuals_df: pd.DataFrame,
 ) -> None:
     """Create academic-quality benchmark comparison visualizations (Module 6)."""
     print("\n=== Modül 6: Akademik Görselleştirme ===")
     sns.set_style("whitegrid")
 
-    fig, axes = plt.subplots(3, 1, figsize=(20, 18), gridspec_kw={"height_ratios": [1.0, 1.5, 1.2]})
+    fig, axes = plt.subplots(3, 1, figsize=(18, 15), gridspec_kw={"height_ratios": [1.0, 1.5, 1.2]})
 
     # Grafik 1: RMSE bar chart
     model_colors = {
@@ -255,10 +256,22 @@ def plot_module_6_visualizations(
     axes[1].legend(loc="best")
 
     # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost)
-    hybrid_residual = y_test - predictions_df["Hibrit ARIMAX-MLP"]
-    xgb_residual = y_test - predictions_df["XGBoost"]
-    sns.kdeplot(hybrid_residual, fill=True, alpha=0.35, label="Hibrit ARIMAX-MLP Residual", ax=axes[2], color="#8b0000")
-    sns.kdeplot(xgb_residual, fill=True, alpha=0.35, label="XGBoost Residual", ax=axes[2], color="#4c78a8")
+    sns.kdeplot(
+        residuals_df["Hibrit ARIMAX-MLP"],
+        fill=True,
+        alpha=0.35,
+        label="Hibrit ARIMAX-MLP Residual",
+        ax=axes[2],
+        color="#8b0000",
+    )
+    sns.kdeplot(
+        residuals_df["XGBoost"],
+        fill=True,
+        alpha=0.35,
+        label="XGBoost Residual",
+        ax=axes[2],
+        color="#4c78a8",
+    )
     axes[2].axvline(0, linestyle="--", color="black", linewidth=1.2)
     axes[2].set_title("Grafik 3 - Residual Dağılımı (Gerçek - Tahmin)", fontsize=14)
     axes[2].set_xlabel("Residual")
@@ -333,20 +346,23 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
         "Hibrit ARIMAX-MLP": hybrid_pred,
     }
     predictions_df = pd.DataFrame(predictions).reindex(y_test.index)
-
-    metrics_df = calculate_metrics(y_test, predictions)
-    pd.set_option("display.float_format", lambda x: f"{x:.6f}")
-    print("\nTest Seti Performans Tablosu (RMSE / MAE / MAPE):")
-    print(metrics_df)
-
-    plot_module_6_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df)
-
     residuals_df = pd.DataFrame(
         {
             "XGBoost": y_test - predictions_df["XGBoost"],
             "Hibrit ARIMAX-MLP": y_test - predictions_df["Hibrit ARIMAX-MLP"],
         },
         index=y_test.index,
+    )
+
+    metrics_df = calculate_metrics(y_test, predictions)
+    print("\nTest Seti Performans Tablosu (RMSE / MAE / MAPE):")
+    print(metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+
+    plot_module_6_visualizations(
+        y_test=y_test,
+        predictions_df=predictions_df,
+        metrics_df=metrics_df,
+        residuals_df=residuals_df,
     )
 
     return PipelineResult(
