@@ -18,7 +18,7 @@ Model:
 
 ## Notebook Yapısı
 
-Notebook/Colab akışı 5 modül içerir:
+Notebook/Colab akışı 6 modül içerir:
 
 1. Veri çekme, ffill/bfill, MinMax, ADF/diff
 2. ARIMAX eğitimi ve test tahmini
