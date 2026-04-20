@@ -11,6 +11,7 @@ from src.cbam_hybrid import (
     enforce_stationarity,
     train_test_split_time_series,
     build_residual_training_frame,
+    calculate_metrics,
 )
 
 
@@ -70,3 +71,18 @@ def test_build_residual_training_frame_creates_lagged_feature():
     assert list(X.columns) == ["x1", "residual_lag1"]
     assert len(X) == len(y) == 5
     assert not X.isna().any().any()
+
+
+def test_calculate_metrics_returns_rmse_mae_mape_for_all_models():
+    idx = pd.date_range("2024-01-01", periods=4, freq="D")
+    y_true = pd.Series([0.2, 0.3, 0.4, 0.5], index=idx)
+    predictions = {
+        "Baseline": pd.Series([0.21, 0.31, 0.39, 0.52], index=idx),
+        "ARIMAX": pd.Series([0.2, 0.3, 0.4, 0.5], index=idx),
+    }
+
+    metrics = calculate_metrics(y_true, predictions)
+
+    assert list(metrics.columns) == ["Model", "RMSE", "MAE", "MAPE"]
+    assert set(metrics["Model"]) == {"Baseline", "ARIMAX"}
+    assert (metrics[["RMSE", "MAE", "MAPE"]] >= 0).all().all()
