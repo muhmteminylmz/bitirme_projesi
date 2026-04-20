@@ -243,6 +243,21 @@ def plot_module_6_visualizations(
     bar_colors = [MODEL_COLORS.get(model, DEFAULT_MODEL_COLOR) for model in metrics_df["Model"]]
     ax = plt.gca()
     sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=ax)
+    if not metrics_df.empty:
+        max_rmse = float(metrics_df["RMSE"].max())
+        small_bar_threshold_ratio = 0.08
+        label_offset_ratio = 0.01
+        for patch in ax.patches:
+            value = patch.get_height()
+            x_center = patch.get_x() + patch.get_width() / 2
+            y_pos = value / 2
+            text_color = "white"
+            vertical_align = "center"
+            if value < (max_rmse * small_bar_threshold_ratio):
+                y_pos = value + (max_rmse * label_offset_ratio)
+                text_color = "black"
+                vertical_align = "bottom"
+            ax.text(x_center, y_pos, f"{value:.4f}", ha="center", va=vertical_align, fontsize=9, color=text_color)
     ax.set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
     ax.set_xlabel("Model")
     ax.set_ylabel("RMSE")
