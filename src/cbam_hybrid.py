@@ -26,6 +26,8 @@ MODEL_COLORS = {
     "Hibrit ARIMAX-MLP": "#8b0000",
 }
 DEFAULT_MODEL_COLOR = "#808080"
+SMALL_BAR_THRESHOLD_RATIO = 0.08
+LABEL_OFFSET_RATIO = 0.01
 
 
 @dataclass
@@ -244,17 +246,24 @@ def plot_module_6_visualizations(
     ax = plt.gca()
     sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=ax)
     if not metrics_df.empty:
-        max_rmse = float(metrics_df["RMSE"].max())
-        small_bar_threshold_ratio = 0.08
-        label_offset_ratio = 0.01
+        rmse_values = pd.to_numeric(metrics_df["RMSE"], errors="coerce")
+        valid_rmse_values = rmse_values[np.isfinite(rmse_values)]
+        if valid_rmse_values.size == 0:
+            max_valid_rmse = None
+        else:
+            max_valid_rmse = float(valid_rmse_values.max())
         for patch in ax.patches:
+            if max_valid_rmse is None:
+                break
             value = patch.get_height()
+            if not np.isfinite(value):
+                continue
             x_center = patch.get_x() + patch.get_width() / 2
             y_pos = value / 2
             text_color = "white"
             vertical_align = "center"
-            if value < (max_rmse * small_bar_threshold_ratio):
-                y_pos = value + (max_rmse * label_offset_ratio)
+            if value < (max_valid_rmse * SMALL_BAR_THRESHOLD_RATIO):
+                y_pos = value + (max_valid_rmse * LABEL_OFFSET_RATIO)
                 text_color = "black"
                 vertical_align = "bottom"
             ax.text(x_center, y_pos, f"{value:.4f}", ha="center", va=vertical_align, fontsize=9, color=text_color)
