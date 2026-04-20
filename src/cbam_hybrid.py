@@ -29,7 +29,7 @@ def fetch_market_data(period: str = "5y") -> pd.DataFrame:
     """Download target and exogenous market data from yfinance."""
     try:
         import yfinance as yf
-    except Exception as exc:  # pragma: no cover - runtime import guard
+    except ImportError as exc:  # pragma: no cover - runtime import guard
         raise ImportError(
             "yfinance is required for Module 1. Install dependencies from requirements.txt"
         ) from exc
@@ -121,7 +121,7 @@ def train_mlp(X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 80, batch
         import tensorflow as tf
         from tensorflow.keras import Sequential
         from tensorflow.keras.layers import Dense
-    except Exception as exc:  # pragma: no cover - runtime import guard
+    except ImportError as exc:  # pragma: no cover - runtime import guard
         raise ImportError(
             "TensorFlow is required for Module 4 (MLP). Install dependencies from requirements.txt"
         ) from exc
