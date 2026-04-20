@@ -111,7 +111,7 @@ def fit_arimax(y_train: pd.Series, x2_train: pd.Series):
 
 
 def fit_xgboost_regressor(X_train: pd.DataFrame, y_train: pd.Series):
-    """Fit XGBoost regressor benchmark model."""
+    """Fit XGBoost benchmark with requested baseline parameters."""
     try:
         from xgboost import XGBRegressor
     except ImportError as exc:  # pragma: no cover - runtime import guard
@@ -196,7 +196,7 @@ def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, last_train_residual: f
 
 
 def safe_mape(y_true: pd.Series, y_pred: pd.Series, eps: float = 1e-8) -> float:
-    """Calculate MAPE robustly for near-zero targets."""
+    """Calculate MAPE with epsilon denominator clipping to avoid division-by-zero."""
     y_true_arr = np.asarray(y_true, dtype=float)
     y_pred_arr = np.asarray(y_pred, dtype=float)
     denominator = np.clip(np.abs(y_true_arr), eps, None)
@@ -244,7 +244,7 @@ def plot_module_6_visualizations(
     axes[0].set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
     axes[0].set_xlabel("Model")
     axes[0].set_ylabel("RMSE")
-    axes[0].tick_params(axis="x", rotation=15)
+    axes[0].tick_params(axis="x", labelrotation=15)
 
     # Grafik 2: Test seti tahmin çizgileri
     axes[1].plot(y_test.index, y_test.values, label="Gerçek Y", color="black", linewidth=2.6)
