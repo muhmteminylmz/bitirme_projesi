@@ -293,8 +293,8 @@ def plot_module_6_visualizations(
     # Grafik 4 (Literatür): Gerçek vs Tahmin (Parity/Scatter)
     plt.figure(figsize=(12, 6))
     ax = plt.gca()
-    min_val = float(min(y_test.min(), predictions_df.min().min()))
-    max_val = float(max(y_test.max(), predictions_df.max().max()))
+    min_val = min(y_test.min(), predictions_df.min().min())
+    max_val = max(y_test.max(), predictions_df.max().max())
     for model_name, color in MODEL_COLORS.items():
         if model_name in predictions_df.columns:
             ax.scatter(
