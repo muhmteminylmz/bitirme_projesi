@@ -16,11 +16,9 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 TARGET_TICKER = "EREGL.IS"
-CARBON_TICKER = "KEA"
+CARBON_TICKER = "KRBN"
 IRON_TICKER = "TIO=F"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
-PLOT_FIGSIZE = (18, 15)
-PLOT_HEIGHT_RATIOS = [1.0, 1.5, 1.2]
 MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
@@ -56,11 +54,11 @@ def fetch_market_data(period: str = "5y") -> pd.DataFrame:
     close = close.rename(
         columns={
             TARGET_TICKER: "Y_EREGL",
-            CARBON_TICKER: "X1_KEA",
+            CARBON_TICKER: "X1_KRBN",
             IRON_TICKER: "X2_TIO",
         }
     )
-    expected = ["Y_EREGL", "X1_KEA", "X2_TIO"]
+    expected = ["Y_EREGL", "X1_KRBN", "X2_TIO"]
     missing = [c for c in expected if c not in close.columns]
     if missing:
         raise ValueError(f"Missing downloaded columns: {missing}")
@@ -240,32 +238,40 @@ def plot_module_6_visualizations(
     print("\n=== Modül 6: Akademik Görselleştirme ===")
     sns.set_style("whitegrid")
 
-    fig, axes = plt.subplots(3, 1, figsize=PLOT_FIGSIZE, gridspec_kw={"height_ratios": PLOT_HEIGHT_RATIOS})
-
-    # Grafik 1: RMSE bar chart
+    # Grafik 1: RMSE bar chart (ayrı figür)
+    plt.figure(figsize=(12, 5))
     bar_colors = [MODEL_COLORS.get(model, DEFAULT_MODEL_COLOR) for model in metrics_df["Model"]]
-    sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=axes[0])
-    axes[0].set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
-    axes[0].set_xlabel("Model")
-    axes[0].set_ylabel("RMSE")
-    axes[0].tick_params(axis="x", labelrotation=15)
+    ax = plt.gca()
+    sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=ax)
+    ax.set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
+    ax.set_xlabel("Model")
+    ax.set_ylabel("RMSE")
+    ax.tick_params(axis="x", labelrotation=15)
+    plt.tight_layout()
+    plt.show()
 
-    # Grafik 2: Test seti tahmin çizgileri
-    axes[1].plot(y_test.index, y_test.values, label="Gerçek Y", color="black", linewidth=2.6)
+    # Grafik 2: Test seti tahmin çizgileri (ayrı figür)
+    plt.figure(figsize=(14, 6))
+    ax = plt.gca()
+    ax.plot(y_test.index, y_test.values, label="Gerçek Y", color="black", linewidth=2.6)
     for col in predictions_df.columns:
-        axes[1].plot(y_test.index, predictions_df[col].values, label=col, linewidth=1.8)
-    axes[1].set_title("Grafik 2 - Test Seti Üzerinde Zaman Serisi Tahminleri", fontsize=14)
-    axes[1].set_xlabel("Tarih")
-    axes[1].set_ylabel("Y (Ölçeklenmiş/Durağanlaştırılmış)")
-    axes[1].legend(loc="best")
+        ax.plot(y_test.index, predictions_df[col].values, label=col, linewidth=1.8)
+    ax.set_title("Grafik 2 - Test Seti Üzerinde Zaman Serisi Tahminleri", fontsize=14)
+    ax.set_xlabel("Tarih")
+    ax.set_ylabel("Y (Ölçeklenmiş/Durağanlaştırılmış)")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
 
-    # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost)
+    # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost, ayrı figür)
+    plt.figure(figsize=(12, 5))
+    ax = plt.gca()
     sns.kdeplot(
         residuals_df["Hibrit ARIMAX-MLP"],
         fill=True,
         alpha=0.35,
         label="Hibrit ARIMAX-MLP Residual",
-        ax=axes[2],
+        ax=ax,
         color="#8b0000",
     )
     sns.kdeplot(
@@ -273,15 +279,50 @@ def plot_module_6_visualizations(
         fill=True,
         alpha=0.35,
         label="XGBoost Residual",
-        ax=axes[2],
+        ax=ax,
         color=MODEL_COLORS["XGBoost"],
     )
-    axes[2].axvline(0, linestyle="--", color="black", linewidth=1.2)
-    axes[2].set_title("Grafik 3 - Residual Dağılımı (Gerçek - Tahmin)", fontsize=14)
-    axes[2].set_xlabel("Residual")
-    axes[2].set_ylabel("Yoğunluk")
-    axes[2].legend(loc="best")
+    ax.axvline(0, linestyle="--", color="black", linewidth=1.2)
+    ax.set_title("Grafik 3 - Residual Dağılımı (Gerçek - Tahmin)", fontsize=14)
+    ax.set_xlabel("Residual")
+    ax.set_ylabel("Yoğunluk")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
 
+    # Grafik 4 (Literatür): Gerçek vs Tahmin (Parity/Scatter)
+    plt.figure(figsize=(12, 6))
+    ax = plt.gca()
+    min_val = min(y_test.min(), predictions_df.min().min())
+    max_val = max(y_test.max(), predictions_df.max().max())
+    for model_name, color in MODEL_COLORS.items():
+        if model_name in predictions_df.columns:
+            ax.scatter(
+                y_test.values,
+                predictions_df[model_name].values,
+                alpha=0.7,
+                s=35,
+                label=model_name,
+                color=color,
+            )
+    ax.plot([min_val, max_val], [min_val, max_val], linestyle="--", color="black", linewidth=1.2, label="y=x")
+    ax.set_title("Grafik 4 - Parity Plot (Gerçek vs Tahmin)", fontsize=14)
+    ax.set_xlabel("Gerçek Y")
+    ax.set_ylabel("Tahmin Y")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # Grafik 5 (Literatür): Residual zaman serisi
+    plt.figure(figsize=(14, 5))
+    ax = plt.gca()
+    ax.plot(residuals_df.index, residuals_df["Hibrit ARIMAX-MLP"], label="Hibrit Residual", color="#8b0000", linewidth=1.8)
+    ax.plot(residuals_df.index, residuals_df["XGBoost"], label="XGBoost Residual", color=MODEL_COLORS["XGBoost"], linewidth=1.8, alpha=0.85)
+    ax.axhline(0, linestyle="--", color="black", linewidth=1.2)
+    ax.set_title("Grafik 5 - Residual Zaman Serisi Karşılaştırması", fontsize=14)
+    ax.set_xlabel("Tarih")
+    ax.set_ylabel("Residual")
+    ax.legend(loc="best")
     plt.tight_layout()
     plt.show()
 
@@ -299,7 +340,7 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
     print("\n=== Modül 2: ARIMAX Eğitimi ve Test Tahmini ===")
     train_df, test_df = train_test_split_time_series(stationary_df, train_ratio=0.8)
     y_train, y_test = train_df["Y_EREGL"], test_df["Y_EREGL"]
-    x1_train, x1_test = train_df["X1_KEA"], test_df["X1_KEA"]
+    x1_train, x1_test = train_df["X1_KRBN"], test_df["X1_KRBN"]
     x2_train, x2_test = train_df["X2_TIO"], test_df["X2_TIO"]
 
     arimax_fit = fit_arimax(y_train, x2_train)
@@ -319,8 +360,8 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
 
     print("\n=== Modül 5: Benchmark + Hibrit Değerlendirme ===")
     # Baseline Linear Regression
-    X_train_bench = train_df[["X1_KEA", "X2_TIO"]]
-    X_test_bench = test_df[["X1_KEA", "X2_TIO"]]
+    X_train_bench = train_df[["X1_KRBN", "X2_TIO"]]
+    X_test_bench = test_df[["X1_KRBN", "X2_TIO"]]
 
     baseline_model = LinearRegression()
     baseline_model.fit(X_train_bench, y_train)

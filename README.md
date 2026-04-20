@@ -7,7 +7,7 @@ Bu repo, **EREGL.IS** için CBAM şok etkisini modellemek amacıyla istenen yeni
 Son 5 yıllık günlük veride şu yapıyı kurar:
 
 - **Y:** `EREGL.IS` (Erdemir kapanış fiyatı)
-- **X1:** `KEA` (EU ETS proxy)
+- **X1:** `KRBN` (global carbon ETF proxy)
 - **X2:** `TIO=F` (demir cevheri vadeli)
 
 Model:
@@ -25,7 +25,7 @@ Notebook/Colab akışı 6 modül içerir:
 3. Eğitim residual çıkarımı
 4. TensorFlow/Keras MLP eğitimi
 5. Benchmark modelleri (Baseline + XGBoost), hibrit birleşim ve RMSE/MAE/MAPE karşılaştırması
-6. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı)
+6. Akademik görselleştirme (ayrı figürler: RMSE bar chart, test tahmin çizgileri, residual dağılımı, parity plot, residual zaman serisi)
 
 ## Kurulum
 
