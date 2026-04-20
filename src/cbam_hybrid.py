@@ -18,6 +18,15 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEA"
 IRON_TICKER = "TIO=F"
+XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
+PLOT_FIGSIZE = (18, 15)
+PLOT_HEIGHT_RATIOS = [1.0, 1.5, 1.2]
+MODEL_COLORS = {
+    "Baseline": "#6c7a89",
+    "ARIMAX": "#4c78a8",
+    "XGBoost": "#72b7b2",
+    "Hibrit ARIMAX-MLP": "#8b0000",
+}
 
 
 @dataclass
@@ -121,9 +130,9 @@ def fit_xgboost_regressor(X_train: pd.DataFrame, y_train: pd.Series):
 
     model = XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=100,
-        learning_rate=0.1,
-        max_depth=5,
+        n_estimators=XGBOOST_PARAMS["n_estimators"],
+        learning_rate=XGBOOST_PARAMS["learning_rate"],
+        max_depth=XGBOOST_PARAMS["max_depth"],
         random_state=42,
     )
     model.fit(X_train, y_train)
@@ -196,7 +205,7 @@ def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, last_train_residual: f
 
 
 def safe_mape(y_true: pd.Series, y_pred: pd.Series, eps: float = 1e-8) -> float:
-    """Calculate MAPE with epsilon denominator clipping to avoid division-by-zero."""
+    """Calculate MAPE (%) with epsilon clipping to prevent division by zero near zero targets."""
     y_true_arr = np.asarray(y_true, dtype=float)
     y_pred_arr = np.asarray(y_pred, dtype=float)
     denominator = np.clip(np.abs(y_true_arr), eps, None)
@@ -230,16 +239,10 @@ def plot_module_6_visualizations(
     print("\n=== Modül 6: Akademik Görselleştirme ===")
     sns.set_style("whitegrid")
 
-    fig, axes = plt.subplots(3, 1, figsize=(18, 15), gridspec_kw={"height_ratios": [1.0, 1.5, 1.2]})
+    fig, axes = plt.subplots(3, 1, figsize=PLOT_FIGSIZE, gridspec_kw={"height_ratios": PLOT_HEIGHT_RATIOS})
 
     # Grafik 1: RMSE bar chart
-    model_colors = {
-        "Baseline": "#6c7a89",
-        "ARIMAX": "#4c78a8",
-        "XGBoost": "#72b7b2",
-        "Hibrit ARIMAX-MLP": "#8b0000",
-    }
-    bar_colors = [model_colors.get(model, "#808080") for model in metrics_df["Model"]]
+    bar_colors = [MODEL_COLORS.get(model, "#808080") for model in metrics_df["Model"]]
     sns.barplot(data=metrics_df, x="Model", y="RMSE", palette=bar_colors, ax=axes[0])
     axes[0].set_title("Grafik 1 - Model Performans Karşılaştırması (RMSE)", fontsize=14)
     axes[0].set_xlabel("Model")
