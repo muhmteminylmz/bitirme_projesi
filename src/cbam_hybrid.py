@@ -29,7 +29,8 @@ MODEL_COLORS = {
 DEFAULT_MODEL_COLOR = "#808080"
 SMALL_BAR_THRESHOLD_RATIO = 0.08
 LABEL_OFFSET_RATIO = 0.01
-STRESS_SCENARIOS = {"S1 (+%30 Karbon)": 0.08, "S2 (+%60 Karbon)": 0.15, "S3 (+%100 Karbon)": 0.25}
+CARBON_SHOCK_SCENARIOS = {"S1 (+%30 Karbon)": 0.30, "S2 (+%60 Karbon)": 0.60, "S3 (+%100 Karbon)": 1.00}
+MAX_PRICE_DROP_AT_FULL_SHOCK = 0.25
 
 plt.rcParams["figure.dpi"] = 300
 sns.set_style("whitegrid")
@@ -339,8 +340,11 @@ def plot_stress_test_fan(last_observed_value: float, horizon_days: int = 30) -> 
     periods = np.arange(1, horizon_days + 1)
     base_scenario = np.full(horizon_days, float(last_observed_value))
     scenario_paths = {}
+    scenario_max_drops = {}
 
-    for scenario_name, max_drop in STRESS_SCENARIOS.items():
+    for scenario_name, carbon_shock in CARBON_SHOCK_SCENARIOS.items():
+        max_drop = MAX_PRICE_DROP_AT_FULL_SHOCK * carbon_shock
+        scenario_max_drops[scenario_name] = max_drop
         decline_curve = max_drop * (periods / horizon_days)
         scenario_paths[scenario_name] = base_scenario * (1 - decline_curve)
 
@@ -364,9 +368,15 @@ def plot_stress_test_fan(last_observed_value: float, horizon_days: int = 30) -> 
     plt.show()
 
     stress_rows = []
-    for name, scenario in scenario_paths.items():
-        drop_pct = (1 - (scenario[-1] / base_scenario[-1])) * 100
-        stress_rows.append({"Senaryo": name, "30. Gün Yüzde Düşüş": float(drop_pct)})
+    for name, carbon_shock in CARBON_SHOCK_SCENARIOS.items():
+        drop_pct = scenario_max_drops[name] * 100
+        stress_rows.append(
+            {
+                "Senaryo": name,
+                "Karbon Şoku": f"+%{int(carbon_shock * 100)}",
+                "30. Gün Yüzde Düşüş": float(drop_pct),
+            }
+        )
     return pd.DataFrame(stress_rows)
 
 
