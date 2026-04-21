@@ -12,6 +12,7 @@ import seaborn as sns
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
@@ -28,6 +29,11 @@ MODEL_COLORS = {
 DEFAULT_MODEL_COLOR = "#808080"
 SMALL_BAR_THRESHOLD_RATIO = 0.08
 LABEL_OFFSET_RATIO = 0.01
+STRESS_TEST_SCENARIOS = {"S1 (+%30 Karbon)": 0.30, "S2 (+%60 Karbon)": 0.60, "S3 (+%100 Karbon)": 1.00}
+MAX_PRICE_DROP_AT_FULL_SHOCK = 0.25
+
+plt.rcParams["figure.dpi"] = 300
+sns.set_style("whitegrid")
 
 
 @dataclass
@@ -56,11 +62,11 @@ def fetch_market_data(period: str = "5y") -> pd.DataFrame:
     close = close.rename(
         columns={
             TARGET_TICKER: "Y_EREGL",
-            CARBON_TICKER: "X1_KRBN",
+            CARBON_TICKER: "X1_KEUA",
             IRON_TICKER: "X2_TIO",
         }
     )
-    expected = ["Y_EREGL", "X1_KRBN", "X2_TIO"]
+    expected = ["Y_EREGL", "X1_KEUA", "X2_TIO"]
     missing = [c for c in expected if c not in close.columns]
     if missing:
         raise ValueError(f"Missing downloaded columns: {missing}")
@@ -80,20 +86,27 @@ def clean_and_scale_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, MinMaxScaler]:
     return scaled_df, scaler
 
 
-def enforce_stationarity(df: pd.DataFrame, alpha: float = 0.05) -> Tuple[pd.DataFrame, Dict[str, bool]]:
+def enforce_stationarity(df: pd.DataFrame, alpha: float = 0.05) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Run ADF tests and difference non-stationary series."""
     stationary = pd.DataFrame(index=df.index)
-    was_stationary: Dict[str, bool] = {}
+    adf_rows = []
 
     for col in df.columns:
         series = df[col].dropna()
         p_value = adfuller(series)[1]
         is_stationary = p_value < alpha
-        was_stationary[col] = is_stationary
         stationary[col] = df[col] if is_stationary else df[col].diff()
+        adf_rows.append(
+            {
+                "Seri": col,
+                "ADF p-değeri": float(p_value),
+                "Durağan": "Evet" if is_stationary else "Hayır",
+                "Dönüşüm": "Yok" if is_stationary else "1. fark (diff)",
+            }
+        )
 
     stationary = stationary.dropna()
-    return stationary, was_stationary
+    return stationary, pd.DataFrame(adf_rows)
 
 
 def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8):
@@ -205,16 +218,8 @@ def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, last_train_residual: f
     return pd.Series({idx: val for idx, val in preds}, name="mlp_residual_pred")
 
 
-def safe_mape(y_true: pd.Series, y_pred: pd.Series, eps: float = 1e-8) -> float:
-    """Calculate MAPE (%) with epsilon clipping to prevent division by zero near zero targets."""
-    y_true_arr = np.asarray(y_true, dtype=float)
-    y_pred_arr = np.asarray(y_pred, dtype=float)
-    denominator = np.clip(np.abs(y_true_arr), eps, None)
-    return float(np.mean(np.abs((y_true_arr - y_pred_arr) / denominator)) * 100)
-
-
 def calculate_metrics(y_true: pd.Series, predictions: Dict[str, pd.Series]) -> pd.DataFrame:
-    """Compute RMSE, MAE, MAPE for all model predictions."""
+    """Compute RMSE and MAE for all model predictions."""
     rows = []
     for model_name, pred in predictions.items():
         aligned_pred = pred.reindex(y_true.index)
@@ -223,7 +228,6 @@ def calculate_metrics(y_true: pd.Series, predictions: Dict[str, pd.Series]) -> p
                 "Model": model_name,
                 "RMSE": float(np.sqrt(mean_squared_error(y_true, aligned_pred))),
                 "MAE": float(mean_absolute_error(y_true, aligned_pred)),
-                "MAPE": safe_mape(y_true, aligned_pred),
             }
         )
 
@@ -238,7 +242,6 @@ def plot_module_6_visualizations(
 ) -> None:
     """Create academic-quality benchmark comparison visualizations (Module 6)."""
     print("\n=== Modül 6: Akademik Görselleştirme ===")
-    sns.set_style("whitegrid")
 
     # Grafik 1: RMSE bar chart (ayrı figür)
     plt.figure(figsize=(12, 5))
@@ -272,6 +275,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("RMSE")
     ax.tick_params(axis="x", labelrotation=15)
     plt.tight_layout()
+    plt.savefig("Grafik_1_RMSE_Karsilastirmasi.png", dpi=300, bbox_inches="tight")
     plt.show()
 
     # Grafik 2: Test seti tahmin çizgileri (ayrı figür)
@@ -285,6 +289,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("Y (Ölçeklenmiş/Durağanlaştırılmış)")
     ax.legend(loc="best")
     plt.tight_layout()
+    plt.savefig("Grafik_2_Test_Tahminleri.png", dpi=300, bbox_inches="tight")
     plt.show()
 
     # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost, ayrı figür)
@@ -312,43 +317,67 @@ def plot_module_6_visualizations(
     ax.set_ylabel("Yoğunluk")
     ax.legend(loc="best")
     plt.tight_layout()
+    plt.savefig("Grafik_3_Residual_Dagilimi.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    # Grafik 4 (Literatür): Gerçek vs Tahmin (Parity/Scatter)
-    plt.figure(figsize=(12, 6))
-    ax = plt.gca()
-    min_val = min(y_test.min(), predictions_df.min().min())
-    max_val = max(y_test.max(), predictions_df.max().max())
-    for model_name, color in MODEL_COLORS.items():
-        if model_name in predictions_df.columns:
-            ax.scatter(
-                y_test.values,
-                predictions_df[model_name].values,
-                alpha=0.7,
-                s=35,
-                label=model_name,
-                color=color,
-            )
-    ax.plot([min_val, max_val], [min_val, max_val], linestyle="--", color="black", linewidth=1.2, label="y=x")
-    ax.set_title("Grafik 4 - Parity Plot (Gerçek vs Tahmin)", fontsize=14)
-    ax.set_xlabel("Gerçek Y")
-    ax.set_ylabel("Tahmin Y")
-    ax.legend(loc="best")
-    plt.tight_layout()
-    plt.show()
-
-    # Grafik 5 (Literatür): Residual zaman serisi
+    # Grafik 4 (Literatür): Residual zaman serisi
     plt.figure(figsize=(14, 5))
     ax = plt.gca()
     ax.plot(residuals_df.index, residuals_df["Hibrit ARIMAX-MLP"], label="Hibrit Residual", color="#8b0000", linewidth=1.8)
     ax.plot(residuals_df.index, residuals_df["XGBoost"], label="XGBoost Residual", color=MODEL_COLORS["XGBoost"], linewidth=1.8, alpha=0.85)
     ax.axhline(0, linestyle="--", color="black", linewidth=1.2)
-    ax.set_title("Grafik 5 - Residual Zaman Serisi Karşılaştırması", fontsize=14)
+    ax.set_title("Grafik 4 - Residual Zaman Serisi Karşılaştırması", fontsize=14)
     ax.set_xlabel("Tarih")
     ax.set_ylabel("Residual")
     ax.legend(loc="best")
     plt.tight_layout()
+    plt.savefig("Grafik_4_Residual_Zaman_Serisi.png", dpi=300, bbox_inches="tight")
     plt.show()
+
+
+def plot_stress_test_fan(last_observed_value: float, horizon_days: int = 30) -> pd.DataFrame:
+    """Plot hypothetical 30-day fan chart under carbon shock scenarios."""
+    periods = np.arange(1, horizon_days + 1)
+    base_scenario = np.full(horizon_days, float(last_observed_value))
+    scenario_paths = {}
+    scenario_max_drops = {}
+
+    for scenario_name, carbon_shock in STRESS_TEST_SCENARIOS.items():
+        max_drop = MAX_PRICE_DROP_AT_FULL_SHOCK * carbon_shock
+        scenario_max_drops[scenario_name] = max_drop
+        decline_curve = max_drop * (periods / horizon_days)
+        scenario_paths[scenario_name] = base_scenario * (1 - decline_curve)
+
+    plt.figure(figsize=(12, 6))
+    ax = plt.gca()
+    ax.plot(periods, base_scenario, "k:", linewidth=2.0, label="Baz Senaryo")
+
+    s1 = scenario_paths["S1 (+%30 Karbon)"]
+    s2 = scenario_paths["S2 (+%60 Karbon)"]
+    s3 = scenario_paths["S3 (+%100 Karbon)"]
+    ax.fill_between(periods, base_scenario, s1, color="#f4a261", alpha=0.35, label="S1 (+%30 Karbon)")
+    ax.fill_between(periods, s1, s2, color="#e76f51", alpha=0.30, label="S2 (+%60 Karbon)")
+    ax.fill_between(periods, s2, s3, color="#8b0000", alpha=0.25, label="S3 (+%100 Karbon)")
+    ax.plot(periods, s3, color="#8b0000", linewidth=1.4)
+    ax.set_title("Grafik 5 - Stres Testi Yelpaze Grafiği (30 Gün)", fontsize=14)
+    ax.set_xlabel("Test Sonrası Gün")
+    ax.set_ylabel("Simüle Edilen Erdemir Fiyat Seviyesi")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig("Grafik_5_Stres_Testi.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    stress_rows = []
+    for name, carbon_shock in STRESS_TEST_SCENARIOS.items():
+        drop_pct = scenario_max_drops[name] * 100
+        stress_rows.append(
+            {
+                "Senaryo": name,
+                "Karbon Şoku": f"+%{int(carbon_shock * 100)}",
+                "30. Gün Yüzde Düşüş": float(drop_pct),
+            }
+        )
+    return pd.DataFrame(stress_rows)
 
 
 def run_pipeline(period: str = "5y") -> PipelineResult:
@@ -356,15 +385,15 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
     print("\n=== Modül 1: Veri Çekme, Temizleme, Normalizasyon ve ADF Testi ===")
     raw_df = fetch_market_data(period=period)
     scaled_df, _ = clean_and_scale_data(raw_df)
-    stationary_df, stationarity = enforce_stationarity(scaled_df)
+    stationary_df, adf_results_df = enforce_stationarity(scaled_df)
 
-    for col, is_stat in stationarity.items():
-        print(f"{col} durağan mı? {'Evet' if is_stat else 'Hayır (diff uygulandı)'}")
+    print("\nADF Test Sonuçları:")
+    print(adf_results_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
     print("\n=== Modül 2: ARIMAX Eğitimi ve Test Tahmini ===")
     train_df, test_df = train_test_split_time_series(stationary_df, train_ratio=0.8)
     y_train, y_test = train_df["Y_EREGL"], test_df["Y_EREGL"]
-    x1_train, x1_test = train_df["X1_KRBN"], test_df["X1_KRBN"]
+    x1_train, x1_test = train_df["X1_KEUA"], test_df["X1_KEUA"]
     x2_train, x2_test = train_df["X2_TIO"], test_df["X2_TIO"]
 
     arimax_fit = fit_arimax(y_train, x2_train)
@@ -384,8 +413,8 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
 
     print("\n=== Modül 5: Benchmark + Hibrit Değerlendirme ===")
     # Baseline Linear Regression
-    X_train_bench = train_df[["X1_KRBN", "X2_TIO"]]
-    X_test_bench = test_df[["X1_KRBN", "X2_TIO"]]
+    X_train_bench = train_df[["X1_KEUA", "X2_TIO"]]
+    X_test_bench = test_df[["X1_KEUA", "X2_TIO"]]
 
     baseline_model = LinearRegression()
     baseline_model.fit(X_train_bench, y_train)
@@ -424,8 +453,20 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
     )
 
     metrics_df = calculate_metrics(y_test, predictions)
-    print("\nTest Seti Performans Tablosu (RMSE / MAE / MAPE):")
+    print("\nTest Seti Performans Tablosu (RMSE / MAE):")
     print(metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+
+    hybrid_residuals = residuals_df["Hibrit ARIMAX-MLP"].dropna()
+    ljung_box_pvalue = float(acorr_ljungbox(hybrid_residuals, lags=[10], return_df=True)["lb_pvalue"].iloc[0])
+    arch_lm_pvalue = float(het_arch(hybrid_residuals)[1])
+    diagnostics_df = pd.DataFrame(
+        [
+            {"Test": "Ljung-Box (lag=10) p-değeri", "p-değeri": ljung_box_pvalue},
+            {"Test": "ARCH-LM p-değeri", "p-değeri": arch_lm_pvalue},
+        ]
+    )
+    print("\nResidual Tanı Testleri (Hibrit Model):")
+    print(diagnostics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
     plot_module_6_visualizations(
         y_test=y_test,
@@ -433,6 +474,12 @@ def run_pipeline(period: str = "5y") -> PipelineResult:
         metrics_df=metrics_df,
         residuals_df=residuals_df,
     )
+
+    stress_table_df = plot_stress_test_fan(last_observed_value=float(y_test.iloc[-1]), horizon_days=30)
+    stress_table_print = stress_table_df.copy()
+    stress_table_print["30. Gün Yüzde Düşüş"] = stress_table_print["30. Gün Yüzde Düşüş"].map(lambda x: f"{x:.2f}%")
+    print("\nStres Testi Sonuç Tablosu (30. Gün):")
+    print(stress_table_print.to_string(index=False))
 
     return PipelineResult(
         metrics_table=metrics_df,
