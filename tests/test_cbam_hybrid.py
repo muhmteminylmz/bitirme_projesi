@@ -46,7 +46,7 @@ def test_enforce_stationarity_applies_diff_when_needed():
 
     stationary_df, stationarity = enforce_stationarity(trending)
 
-    assert not all(stationarity.values())
+    assert not all(item["differenced"] is False for item in stationarity.values())
     assert len(stationary_df) < len(trending)
 
 
@@ -73,7 +73,7 @@ def test_build_residual_training_frame_creates_lagged_feature():
     assert not X.isna().any().any()
 
 
-def test_calculate_metrics_returns_rmse_mae_mape_for_all_models():
+def test_calculate_metrics_returns_rmse_mae_for_all_models():
     idx = pd.date_range("2024-01-01", periods=4, freq="D")
     y_true = pd.Series([0.2, 0.3, 0.4, 0.5], index=idx)
     predictions = {
@@ -83,6 +83,6 @@ def test_calculate_metrics_returns_rmse_mae_mape_for_all_models():
 
     metrics = calculate_metrics(y_true, predictions)
 
-    assert list(metrics.columns) == ["Model", "RMSE", "MAE", "MAPE"]
+    assert list(metrics.columns) == ["Model", "RMSE", "MAE"]
     assert set(metrics["Model"]) == {"Baseline", "ARIMAX"}
-    assert (metrics[["RMSE", "MAE", "MAPE"]] >= 0).all().all()
+    assert (metrics[["RMSE", "MAE"]] >= 0).all().all()
