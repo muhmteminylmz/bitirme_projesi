@@ -16,7 +16,7 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 TARGET_TICKER = "EREGL.IS"
-CARBON_TICKER = "KRBN"
+CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MODEL_COLORS = {
