@@ -275,7 +275,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("RMSE")
     ax.tick_params(axis="x", labelrotation=15)
     plt.tight_layout()
-    plt.savefig("Grafik_1_RMSE_Karsilastirmasi.png", dpi=300, bbox_inches="tight")
+    plt.savefig("Grafik_1_RMSE_Karsilastirmasi.png", dpi=300)
     plt.show()
 
     # Grafik 2: Test seti tahmin çizgileri (ayrı figür)
@@ -289,7 +289,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("Y (Ölçeklenmiş/Durağanlaştırılmış)")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig("Grafik_2_Test_Tahminleri.png", dpi=300, bbox_inches="tight")
+    plt.savefig("Grafik_2_Test_Tahminleri.png", dpi=300)
     plt.show()
 
     # Grafik 3: Residual dağılım karşılaştırması (Hibrit vs XGBoost, ayrı figür)
@@ -317,7 +317,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("Yoğunluk")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig("Grafik_3_Residual_Dagilimi.png", dpi=300, bbox_inches="tight")
+    plt.savefig("Grafik_3_Residual_Dagilimi.png", dpi=300)
     plt.show()
 
     # Grafik 4 (Literatür): Residual zaman serisi
@@ -331,7 +331,7 @@ def plot_module_6_visualizations(
     ax.set_ylabel("Residual")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig("Grafik_4_Residual_Zaman_Serisi.png", dpi=300, bbox_inches="tight")
+    plt.savefig("Grafik_4_Residual_Zaman_Serisi.png", dpi=300)
     plt.show()
 
 
@@ -364,7 +364,7 @@ def plot_stress_test_fan(last_observed_value: float, horizon_days: int = 30) -> 
     ax.set_ylabel("Simüle Edilen Erdemir Fiyat Seviyesi")
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.savefig("Grafik_5_Stres_Testi.png", dpi=300, bbox_inches="tight")
+    plt.savefig("Grafik_5_Stres_Testi.png", dpi=300)
     plt.show()
 
     stress_rows = []
