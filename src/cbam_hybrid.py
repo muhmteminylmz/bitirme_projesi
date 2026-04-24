@@ -302,7 +302,33 @@ def run_stress_test(base_price: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(7, 5))
+    sns.heatmap(
+        corr_matrix,
+        annot=True,
+        fmt=".4f",
+        cmap="coolwarm",
+        vmin=-1,
+        vmax=1,
+        linewidths=0.5,
+        ax=ax,
+    )
+    ax.set_title(
+        "Şekil 0: Temel Değişkenler Korelasyon Isı Haritası\n(EREGL.IS, KEUA, TIO=F)",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    plt.savefig("Grafik_0_Correlation_Heatmap.png", dpi=300)
+    plt.close()
+    print("Korelasyon ısı haritası kaydedildi: Grafik_0_Correlation_Heatmap.png")
+
+
 def write_thesis_report(
+    basic_stats: pd.DataFrame,
+    corr_matrix: pd.DataFrame,
     adf_results: Dict[str, Dict[str, float]],
     arimax_summary: str,
     diagnostics_df: pd.DataFrame,
@@ -314,7 +340,15 @@ def write_thesis_report(
         "TEZ BULGULARI RAPORU",
         "=" * 80,
         "",
-        "1) ADF TEST SONUÇLARI",
+        "1) TEMEL İSTATİSTİKLER VE KORELASYON ANALİZİ (HAM VERİ)",
+        "-" * 80,
+        "1a) Temel İstatistikler (Ham Kapanış Fiyatları):",
+        basic_stats.to_string(float_format=lambda x: f"{x:.4f}"),
+        "",
+        "1b) Korelasyon Matrisi (Ham Kapanış Fiyatları):",
+        corr_matrix.to_string(float_format=lambda x: f"{x:.6f}"),
+        "",
+        "2) ADF TEST SONUÇLARI",
         "-" * 80,
     ]
     for col, result in adf_results.items():
@@ -325,19 +359,19 @@ def write_thesis_report(
     lines.extend(
         [
             "",
-            "2) ARIMAX MODEL ÖZETİ",
+            "3) ARIMAX MODEL ÖZETİ",
             "-" * 80,
             arimax_summary,
             "",
-            "3) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM)",
+            "4) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM)",
             "-" * 80,
             diagnostics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "4) TEST KÜMESİ PERFORMANS METRİKLERİ (RMSE / MAE)",
+            "5) TEST KÜMESİ PERFORMANS METRİKLERİ (RMSE / MAE)",
             "-" * 80,
             metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "5) STRES TESTİ SONUÇ TABLOSU",
+            "6) STRES TESTİ SONUÇ TABLOSU",
             "-" * 80,
             stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
@@ -351,6 +385,17 @@ def write_thesis_report(
 def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(period=period, interval=interval)
+
+    print("\n--- Temel İstatistikler (Ham Veri) ---")
+    basic_stats = df_raw.describe()
+    print(basic_stats.to_string(float_format=lambda x: f"{x:.4f}"))
+
+    print("\n--- Korelasyon Matrisi (Ham Veri) ---")
+    corr_matrix = df_raw.corr()
+    print(corr_matrix.to_string(float_format=lambda x: f"{x:.6f}"))
+
+    plot_correlation_heatmap(corr_matrix)
+
     df_scaled, _ = clean_and_scale_data(df_raw)
     df_stationary, adf_results = enforce_stationarity(df_scaled)
     train_df, test_df = train_test_split_time_series(df_stationary)
@@ -421,6 +466,8 @@ def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
     print(stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
     write_thesis_report(
+        basic_stats=basic_stats,
+        corr_matrix=corr_matrix,
         adf_results=adf_results,
         arimax_summary=str(arimax_model.summary()),
         diagnostics_df=diagnostics_df,
