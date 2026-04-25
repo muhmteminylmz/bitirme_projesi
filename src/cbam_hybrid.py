@@ -47,11 +47,16 @@ class PipelineResult:
     stress_table: pd.DataFrame
 
 
-def fetch_yfinance_data(period: str = "5y", interval: str = "1d") -> pd.DataFrame:
+def fetch_yfinance_data(
+    start: str = "2021-04-01",
+    end: str = "2026-04-24",
+    interval: str = "1d",
+) -> pd.DataFrame:
     tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
     raw = yf.download(
         tickers=tickers,
-        period=period,
+        start=start,
+        end=end,
         interval=interval,
         auto_adjust=False,
         progress=False,
@@ -321,16 +326,18 @@ def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
         fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig("Grafik_0_Correlation_Heatmap.png", dpi=300)
+    plt.savefig("Grafik_0_Korelasyon_Heatmap.png", dpi=300)
     plt.close()
-    print("Korelasyon ısı haritası kaydedildi: Grafik_0_Correlation_Heatmap.png")
+    print("Korelasyon ısı haritası kaydedildi: Grafik_0_Korelasyon_Heatmap.png")
 
 
 def write_thesis_report(
     basic_stats: pd.DataFrame,
     corr_matrix: pd.DataFrame,
+    diff_stats: pd.DataFrame,
     adf_results: Dict[str, Dict[str, float]],
     arimax_summary: str,
+    arimax_coef_table_str: str,
     diagnostics_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
     stress_table_df: pd.DataFrame,
@@ -338,6 +345,12 @@ def write_thesis_report(
 ):
     lines = [
         "TEZ BULGULARI RAPORU",
+        "=" * 80,
+        "",
+        "TABLO 4.1: BETİMSEL İSTATİSTİKLER (BİRİNCİ FARKI ALINMIŞ VE TEMİZLENMİŞ SERİLER)",
+        "-" * 80,
+        diff_stats.to_string(float_format=lambda x: f"{x:.6f}"),
+        "",
         "=" * 80,
         "",
         "1) TEMEL İSTATİSTİKLER VE KORELASYON ANALİZİ (HAM VERİ)",
@@ -363,6 +376,10 @@ def write_thesis_report(
             "-" * 80,
             arimax_summary,
             "",
+            "TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR, MA ve X2 / Demir Cevheri)",
+            "-" * 80,
+            arimax_coef_table_str,
+            "",
             "4) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM)",
             "-" * 80,
             diagnostics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
@@ -382,9 +399,9 @@ def write_thesis_report(
     print(f"\nTez raporu oluşturuldu: {report_path}")
 
 
-def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
+def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
-    df_raw = fetch_yfinance_data(period=period, interval=interval)
+    df_raw = fetch_yfinance_data(interval=interval)
 
     print("\n--- Temel İstatistikler (Ham Veri) ---")
     basic_stats = df_raw.describe()
@@ -398,6 +415,13 @@ def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
 
     df_scaled, _ = clean_and_scale_data(df_raw)
     df_stationary, adf_results = enforce_stationarity(df_scaled)
+
+    print("\n--- Betimsel İstatistikler (Birinci Farkı Alınmış Seriler) ---")
+    diff_stats = df_stationary.describe().T[["mean", "std", "min", "max"]]
+    diff_stats["skewness"] = df_stationary.skew()
+    diff_stats.columns = ["Ortalama (Mean)", "Standart Sapma (Std)", "Min", "Max", "Çarpıklık (Skewness)"]
+    print(diff_stats.to_string(float_format=lambda x: f"{x:.6f}"))
+
     train_df, test_df = train_test_split_time_series(df_stationary)
 
     y_train = train_df[TARGET_TICKER]
@@ -409,6 +433,7 @@ def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
 
     print("\n=== Modül 2: ARIMAX Eğitimi ve Benchmark'lar ===")
     arimax_model = fit_sarimax(y_train, exog=x2_train)
+    arimax_coef_table_str = str(arimax_model.summary().tables[1])
     arimax_test_pred = pd.Series(
         arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_test) - 1, exog=x2_test).values,
         index=y_test.index,
@@ -468,8 +493,10 @@ def run_pipeline(period: str = "5y", interval: str = "1d") -> PipelineResult:
     write_thesis_report(
         basic_stats=basic_stats,
         corr_matrix=corr_matrix,
+        diff_stats=diff_stats,
         adf_results=adf_results,
         arimax_summary=str(arimax_model.summary()),
+        arimax_coef_table_str=arimax_coef_table_str,
         diagnostics_df=diagnostics_df,
         metrics_df=metrics_df,
         stress_table_df=stress_table_df,
