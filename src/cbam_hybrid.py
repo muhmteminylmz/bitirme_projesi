@@ -49,7 +49,7 @@ class PipelineResult:
 
 def fetch_yfinance_data(
     start: str = "2021-04-01",
-    end: str = "2026-04-24",
+    end: str = "2026-04-25",
     interval: str = "1d",
 ) -> pd.DataFrame:
     tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
@@ -136,7 +136,13 @@ def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
 
 
 def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    X = pd.DataFrame({"x1": x1_train, "residual_lag1": residuals_train.shift(1)})
+    # İYİLEŞTİRME: MLP'ye daha fazla geçmiş (lag) verisi vererek performansını artırıyoruz.
+    X = pd.DataFrame({
+        "x1": x1_train,
+        "x1_lag1": x1_train.shift(1),
+        "residual_lag1": residuals_train.shift(1),
+        "residual_lag2": residuals_train.shift(2)
+    })
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -156,7 +162,7 @@ def build_and_train_mlp(X_train: np.ndarray, y_train: np.ndarray):
             tf.keras.layers.Dense(1, activation="linear"),
         ]
     )
-    model.compile(optimizer=tf.keras.optimizers.Adam(), loss="mse")
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
 
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss", patience=MLP_PARAMS["patience"], restore_best_weights=True
@@ -174,14 +180,23 @@ def build_and_train_mlp(X_train: np.ndarray, y_train: np.ndarray):
     return model
 
 
-def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, last_train_residual: float) -> pd.Series:
+def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, train_x1_last: float, train_res_last1: float, train_res_last2: float) -> pd.Series:
     preds = []
-    current_residual = last_train_residual
+    curr_res1 = train_res_last1
+    curr_res2 = train_res_last2
+    curr_x1_lag = train_x1_last
+
     for i in range(len(x1_test)):
-        X_input = np.array([[x1_test.iloc[i], current_residual]], dtype=float)
+        curr_x1 = x1_test.iloc[i]
+        X_input = np.array([[curr_x1, curr_x1_lag, curr_res1, curr_res2]], dtype=float)
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
         preds.append(pred_res)
-        current_residual = pred_res
+        
+        # Gelecek adım için lag'leri kaydırıyoruz
+        curr_res2 = curr_res1
+        curr_res1 = pred_res
+        curr_x1_lag = curr_x1
+
     return pd.Series(preds, index=x1_test.index)
 
 
@@ -267,7 +282,7 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
     base = np.full(len(dates), base_price)
 
     plt.figure(figsize=(12, 6))
-    plt.plot(dates, base, color="black", linestyle=":", linewidth=2.2, label="Baz Senaryo")
+    plt.plot(dates, base, color="black", linestyle=":", linewidth=2.2, label="Baz Senaryo Fiyatı")
 
     colors = {"S1 (+%30)": "#ffb703", "S2 (+%60)": "#fb8500", "S3 (+%100)": "#d00000"}
     prev_upper = base.copy()
@@ -283,9 +298,9 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
         prev_upper = upper
         prev_lower = lower
 
-    plt.title("Şekil 4.4: Test Sonrası 30 Gün Stres Testi Yelpaze (Fan) Grafiği", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tarih")
-    plt.ylabel("Simüle Fiyat")
+    plt.ylabel("Hisse Fiyatı (TL)")
     plt.legend(loc="upper left", ncol=2, fontsize=8)
     plt.tight_layout()
     plt.savefig("Grafik_4_Stres_Testi_Fan.png")
@@ -388,9 +403,9 @@ def write_thesis_report(
             "-" * 80,
             metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "6) STRES TESTİ SONUÇ TABLOSU",
+            "6) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
             "-" * 80,
-            stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+            stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
             "",
         ]
     )
@@ -455,8 +470,13 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train)
     mlp_model = build_and_train_mlp(X_mlp_train.values, y_mlp_train.values)
 
+    # İYİLEŞTİRME: MLP test verisi için geçmiş 2 günün hata payı da sağlanıyor.
     mlp_residual_test_pred = forecast_mlp_residuals(
-        mlp_model=mlp_model, x1_test=x1_test, last_train_residual=float(residuals_train.iloc[-1])
+        mlp_model=mlp_model, 
+        x1_test=x1_test, 
+        train_x1_last=float(x1_train.iloc[-1]),
+        train_res_last1=float(residuals_train.iloc[-1]),
+        train_res_last2=float(residuals_train.iloc[-2])
     )
     hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
     hybrid_pred.name = "Hibrit ARIMAX-MLP"
@@ -485,10 +505,11 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     plot_module_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df, residuals_df=residuals_df)
 
     print("\n=== Modül 5: Karbon Stres Testi ===")
-    base_price = float(y_test.iloc[-1])
-    stress_table_df = run_stress_test(base_price=base_price)
-    plot_stress_test_fan_chart(last_test_date=y_test.index[-1], base_price=base_price)
-    print(stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+    # ÇÖZÜM: 0.000 Hatasını önlemek ve gerçekçi sonuç vermek için ham TL fiyatı kullanıldı.
+    real_base_price = float(df_raw[TARGET_TICKER].iloc[-1])
+    stress_table_df = run_stress_test(base_price=real_base_price)
+    plot_stress_test_fan_chart(last_test_date=y_test.index[-1], base_price=real_base_price)
+    print(stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
 
     write_thesis_report(
         basic_stats=basic_stats,
