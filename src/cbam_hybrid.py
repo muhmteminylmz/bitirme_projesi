@@ -247,7 +247,7 @@ def plot_module_visualizations(
             xytext=(0, 5),
             textcoords="offset points",
         )
-    plt.title("Şekil 4.2: Modellerin Test Kümesi MAE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.5: Modellerin Test Kümesi MAE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
     plt.ylabel("MAE Değeri")
     plt.xlabel("")
     plt.tight_layout()
@@ -267,7 +267,7 @@ def plot_module_visualizations(
             linewidth=lw,
             alpha=alpha,
         )
-    plt.title("Şekil 4.3: Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.2: Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
     plt.ylabel("Fiyat / Getiri (Fark Serisi)")
     plt.legend(loc="best")
     plt.tight_layout()
@@ -289,7 +289,7 @@ def plot_module_visualizations(
         fill=True,
         alpha=0.5,
     )
-    plt.title("Şekil 4.4: Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.3: Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tahmin Hatası (Gerçek - Tahmin)")
     plt.ylabel("Yoğunluk (Density)")
     plt.legend()
@@ -319,7 +319,7 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
         prev_upper = upper
         prev_lower = lower
 
-    plt.title("Şekil 4.5: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tarih")
     plt.ylabel("Hisse Fiyatı (TL)")
     plt.legend(loc="upper left", ncol=2, fontsize=8)
