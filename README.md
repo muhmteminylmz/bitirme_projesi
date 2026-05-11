@@ -25,7 +25,7 @@ Notebook/Colab akışı 6 modül içerir:
 3. Eğitim residual çıkarımı
 4. TensorFlow/Keras MLP eğitimi
 5. Benchmark modelleri (Baseline + XGBoost), hibrit birleşim ve RMSE/MAE karşılaştırması
-6. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı, stres testi fan chart)
+6. Akademik görselleştirme (RMSE bar chart, MAE bar chart, test tahmin çizgileri, residual dağılımı, stres testi fan chart)
 
 ## Kurulum
 

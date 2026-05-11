@@ -233,6 +233,27 @@ def plot_module_visualizations(
     plt.savefig("Grafik_1_RMSE_Bar.png")
     plt.close()
 
+    plt.figure(figsize=(8, 6))
+    bar_colors = [MODEL_COLORS.get(m, DEFAULT_MODEL_COLOR) for m in metrics_df["Model"]]
+    ax = sns.barplot(data=metrics_df, x="Model", y="MAE", hue="Model", palette=bar_colors, legend=False)
+    for p in ax.patches:
+        ax.annotate(
+            f"{p.get_height():.6f}",
+            (p.get_x() + p.get_width() / 2.0, p.get_height()),
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="black",
+            xytext=(0, 5),
+            textcoords="offset points",
+        )
+    plt.title("Şekil 4.2: Modellerin Test Kümesi MAE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
+    plt.ylabel("MAE Değeri")
+    plt.xlabel("")
+    plt.tight_layout()
+    plt.savefig("Grafik_5_MAE_Bar.png")
+    plt.close()
+
     plt.figure(figsize=(12, 6))
     plt.plot(y_test.index, y_test.values, color="black", label="Gerçek EREGL.IS", linewidth=2.2, linestyle="--")
     for model_col in predictions_df.columns:
@@ -246,7 +267,7 @@ def plot_module_visualizations(
             linewidth=lw,
             alpha=alpha,
         )
-    plt.title("Şekil 4.2: Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.3: Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
     plt.ylabel("Fiyat / Getiri (Fark Serisi)")
     plt.legend(loc="best")
     plt.tight_layout()
@@ -268,7 +289,7 @@ def plot_module_visualizations(
         fill=True,
         alpha=0.5,
     )
-    plt.title("Şekil 4.3: Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.4: Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tahmin Hatası (Gerçek - Tahmin)")
     plt.ylabel("Yoğunluk (Density)")
     plt.legend()
@@ -298,7 +319,7 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
         prev_upper = upper
         prev_lower = lower
 
-    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.5: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tarih")
     plt.ylabel("Hisse Fiyatı (TL)")
     plt.legend(loc="upper left", ncol=2, fontsize=8)
