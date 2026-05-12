@@ -27,7 +27,7 @@ TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
-MLP_PARAMS = {"epochs": 200, "batch_size": 16, "validation_split": 0.2, "patience": 10}
+MLP_PARAMS = {"epochs": 200, "batch_size": 16, "validation_split": 0.0, "patience": 10}
 MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
@@ -119,6 +119,26 @@ def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8) -> 
     return df.iloc[:train_size].copy(), df.iloc[train_size:].copy()
 
 
+def train_val_test_split_time_series(
+    df: pd.DataFrame, train_ratio: float = 0.7, val_ratio: float = 0.15, test_ratio: float = 0.15
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    total_ratio = train_ratio + val_ratio + test_ratio
+    if not np.isclose(total_ratio, 1.0):
+        raise ValueError("train_ratio + val_ratio + test_ratio toplamı 1.0 olmalıdır.")
+
+    n = len(df)
+    train_size = int(n * train_ratio)
+    val_size = int(n * val_ratio)
+
+    if train_size <= 0 or val_size <= 0 or n - train_size - val_size <= 0:
+        raise ValueError("Veri seti 70/15/15 bölmesi için yetersiz.")
+
+    train_df = df.iloc[:train_size].copy()
+    val_df = df.iloc[train_size:train_size + val_size].copy()
+    test_df = df.iloc[train_size + val_size:].copy()
+    return train_df, val_df, test_df
+
+
 def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
     print("\nARIMAX modeli eğitiliyor...")
     model = SARIMAX(y, exog=exog, order=(1, 0, 1), enforce_stationarity=False, enforce_invertibility=False)
@@ -148,7 +168,12 @@ def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Serie
     return X, y
 
 
-def build_and_train_mlp(X_train: np.ndarray, y_train: np.ndarray):
+def build_and_train_mlp(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+):
     tf.keras.utils.set_random_seed(42)
     model = tf.keras.Sequential(
         [
@@ -164,19 +189,25 @@ def build_and_train_mlp(X_train: np.ndarray, y_train: np.ndarray):
     )
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
 
+    has_validation = X_val is not None and y_val is not None and len(X_val) > 0
     early_stopping = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=MLP_PARAMS["patience"], restore_best_weights=True
+        monitor="val_loss" if has_validation else "loss",
+        patience=MLP_PARAMS["patience"],
+        restore_best_weights=True,
     )
 
-    model.fit(
-        X_train,
-        y_train,
-        epochs=MLP_PARAMS["epochs"],
-        batch_size=MLP_PARAMS["batch_size"],
-        validation_split=MLP_PARAMS["validation_split"],
-        callbacks=[early_stopping],
-        verbose=0,
-    )
+    fit_kwargs = {
+        "epochs": MLP_PARAMS["epochs"],
+        "batch_size": MLP_PARAMS["batch_size"],
+        "callbacks": [early_stopping],
+        "verbose": 0,
+    }
+    if has_validation:
+        fit_kwargs["validation_data"] = (X_val, y_val)
+    else:
+        fit_kwargs["validation_split"] = MLP_PARAMS["validation_split"]
+
+    model.fit(X_train, y_train, **fit_kwargs)
     return model
 
 
@@ -466,11 +497,14 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     diff_stats.columns = ["Ortalama (Mean)", "Standart Sapma (Std)", "Min", "Max", "Çarpıklık (Skewness)"]
     print(diff_stats.to_string(float_format=lambda x: f"{x:.6f}"))
 
-    train_df, test_df = train_test_split_time_series(df_stationary)
+    train_df, val_df, test_df = train_val_test_split_time_series(df_stationary)
 
     y_train = train_df[TARGET_TICKER]
+    y_val = val_df[TARGET_TICKER]
     x1_train = train_df[CARBON_TICKER]
+    x1_val = val_df[CARBON_TICKER]
     x2_train = train_df[IRON_TICKER]
+    x2_val = val_df[IRON_TICKER]
     y_test = test_df[TARGET_TICKER]
     x1_test = test_df[CARBON_TICKER]
     x2_test = test_df[IRON_TICKER]
@@ -485,6 +519,12 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     )
 
     residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
+    arimax_val_pred = pd.Series(
+        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_val) - 1, exog=x2_val).values,
+        index=y_val.index,
+        name="ARIMAX_VAL",
+    )
+    residuals_val = y_val - arimax_val_pred
 
     baseline_model = LinearRegression()
     X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER]]
@@ -496,8 +536,23 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     xgb_pred = pd.Series(xgb_model.predict(X_test_bench), index=y_test.index, name="XGBoost")
 
     print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
-    X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train)
-    mlp_model = build_and_train_mlp(X_mlp_train.values, y_mlp_train.values)
+    x1_train_val = pd.concat([x1_train, x1_val])
+    residuals_train_val = pd.concat([residuals_train, residuals_val])
+    X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val)
+
+    train_index_mask = X_mlp_all.index.isin(x1_train.index)
+    val_index_mask = X_mlp_all.index.isin(x1_val.index)
+    X_mlp_train = X_mlp_all.loc[train_index_mask]
+    y_mlp_train = y_mlp_all.loc[train_index_mask]
+    X_mlp_val = X_mlp_all.loc[val_index_mask]
+    y_mlp_val = y_mlp_all.loc[val_index_mask]
+
+    mlp_model = build_and_train_mlp(
+        X_mlp_train.values,
+        y_mlp_train.values,
+        X_val=X_mlp_val.values,
+        y_val=y_mlp_val.values,
+    )
 
     # İYİLEŞTİRME: MLP test verisi için geçmiş 2 günün hata payı da sağlanıyor.
     mlp_residual_test_pred = forecast_mlp_residuals(
