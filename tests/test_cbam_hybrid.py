@@ -7,10 +7,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.cbam_hybrid import (
+    FX_TICKER,
     apply_hybrid_combiner,
     apply_stationarity_policy,
     build_expanding_windows,
     clean_and_scale_data,
+    compute_log_returns,
     evaluate_success_criteria,
     enforce_stationarity,
     train_test_split_time_series,
@@ -38,6 +40,33 @@ def test_clean_and_scale_data_ffill_bfill_and_range():
     assert not scaled_df.isna().any().any()
     assert (scaled_df.min() >= 0).all()
     assert (scaled_df.max() <= 1).all()
+
+
+def test_clean_and_scale_data_supports_train_only_fit():
+    idx = pd.date_range("2024-01-01", periods=10, freq="D")
+    df = pd.DataFrame(
+        {
+            "a": np.arange(10, dtype=float),
+            "b": np.arange(10, dtype=float) + 10,
+        },
+        index=idx,
+    )
+    train_df = df.iloc[:6]
+
+    scaled_df, _ = clean_and_scale_data(df, fit_df=train_df)
+
+    assert np.isclose(float(scaled_df.iloc[0]["a"]), 0.0)
+    assert float(scaled_df.iloc[-1]["a"]) > 1.0
+
+
+def test_compute_log_returns_produces_expected_shape_and_values():
+    idx = pd.date_range("2024-01-01", periods=4, freq="D")
+    prices = pd.DataFrame({"x": [100.0, 110.0, 121.0, 133.1]}, index=idx)
+
+    returns = compute_log_returns(prices)
+
+    assert len(returns) == 3
+    assert np.allclose(returns["x"].values, np.log([1.1, 1.1, 1.1]))
 
 
 def test_enforce_stationarity_applies_diff_when_needed():
@@ -155,14 +184,15 @@ def test_prepare_leakage_safe_splits_fit_scaler_on_train_only():
             "EREGL.IS": np.linspace(1, 20, 20),
             "KEUA": np.linspace(2, 21, 20),
             "TIO=F": np.linspace(3, 22, 20),
+            "USDTRY=X": np.linspace(25, 35, 20),
         },
         index=idx,
     )
     out = prepare_leakage_safe_splits(df, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2)
 
     assert len(out.train) > 0 and len(out.val) > 0 and len(out.test) > 0
-    assert set(out.train.columns) == {"EREGL.IS", "KEUA", "TIO=F"}
-    assert set(out.stationarity.keys()) == {"EREGL.IS", "KEUA", "TIO=F"}
+    assert set(out.train.columns) == {"EREGL.IS", "KEUA", "TIO=F", FX_TICKER}
+    assert set(out.stationarity.keys()) == {"EREGL.IS", "KEUA", "TIO=F", FX_TICKER}
 
 
 def test_build_expanding_windows_returns_ordered_splits():

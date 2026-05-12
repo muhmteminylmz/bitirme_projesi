@@ -6,9 +6,10 @@ Bu repo, **EREGL.IS** için CBAM şok etkisini modellemek amacıyla istenen yeni
 
 Son 5 yıllık günlük veride şu yapıyı kurar:
 
-- **Y:** `EREGL.IS` (Erdemir kapanış fiyatı)
+- **Y:** `EREGL.IS` (Erdemir kapanış fiyatı, `USDTRY=X` ile USD standardize)
 - **X1:** `KEUA` (global carbon ETF proxy)
 - **X2:** `TIO=F` (demir cevheri vadeli)
+- **X3:** `USDTRY=X` (kur etkisi feature)
 
 Model:
 
@@ -20,7 +21,7 @@ Model:
 
 Notebook/Colab akışı 6 modül içerir:
 
-1. Veri çekme, ffill/bfill, **leakage-safe ölçekleme** (yalnızca train fit), ADF/diff (train referanslı)
+1. Veri çekme, USD standardizasyonu, log-getiri dönüşümü, ffill/bfill, **leakage-safe ölçekleme** (yalnızca train fit), ADF/diff (train referanslı)
 2. ARIMAX eğitimi ve model seçimi (p,d,q + exog adayları; validation RMSE + residual whiteness)
 3. Eğitim/validation residual çıkarımı
 4. TensorFlow/Keras MLP residual modeli (genişletilmiş özellik seti + kontrollü HP/seed araması)

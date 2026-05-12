@@ -4,4 +4,4 @@ from src.cbam_hybrid import run_pipeline
 
 
 if __name__ == "__main__":
-    run_pipeline(period="5y")
+    run_pipeline()

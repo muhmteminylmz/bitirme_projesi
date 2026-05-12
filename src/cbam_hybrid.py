@@ -26,6 +26,7 @@ sns.set_style("whitegrid")
 TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
+FX_TICKER = "USDTRY=X"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patience": 20, "learning_rate": 0.0005}
 SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT = 0.03
@@ -87,7 +88,7 @@ def fetch_yfinance_data(
     end: str = "2026-04-25",
     interval: str = "1d",
 ) -> pd.DataFrame:
-    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
+    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
     raw = yf.download(
         tickers=tickers,
         start=start,
@@ -112,14 +113,32 @@ def fetch_yfinance_data(
     if close_df.isna().any().any():
         missing_cols = close_df.columns[close_df.isna().any()].tolist()
         raise ValueError(f"Veri ffill/bfill sonrasında hâlâ eksik değer içeriyor: {missing_cols}")
-    return close_df
+    invalid_fx = (close_df[FX_TICKER] <= 0).any()
+    if invalid_fx:
+        raise ValueError(f"{FX_TICKER} serisinde sıfır veya negatif değer bulundu, döviz dönüşümü yapılamadı.")
+
+    standardized = pd.DataFrame(index=close_df.index)
+    standardized[TARGET_TICKER] = close_df[TARGET_TICKER] / close_df[FX_TICKER]
+    standardized[CARBON_TICKER] = close_df[CARBON_TICKER]
+    standardized[IRON_TICKER] = close_df[IRON_TICKER]
+    standardized[FX_TICKER] = close_df[FX_TICKER]
+    return standardized
 
 
-def clean_and_scale_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, MinMaxScaler]:
+def clean_and_scale_data(df: pd.DataFrame, fit_df: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, MinMaxScaler]:
     cleaned = df.copy().sort_index().ffill().bfill()
+    fit_cleaned = cleaned if fit_df is None else fit_df.copy().sort_index().ffill().bfill()
     scaler = MinMaxScaler()
-    scaled = pd.DataFrame(scaler.fit_transform(cleaned), columns=cleaned.columns, index=cleaned.index)
+    scaler.fit(fit_cleaned)
+    scaled = pd.DataFrame(scaler.transform(cleaned), columns=cleaned.columns, index=cleaned.index)
     return scaled, scaler
+
+
+def compute_log_returns(df: pd.DataFrame) -> pd.DataFrame:
+    if (df <= 0).any().any():
+        bad_cols = df.columns[(df <= 0).any()].tolist()
+        raise ValueError(f"Log-getiri için tüm sütunlar pozitif olmalı. Sorunlu sütunlar: {bad_cols}")
+    return np.log(df / df.shift(1)).dropna()
 
 
 def safe_adf_pvalue(series: pd.Series) -> float:
@@ -196,7 +215,7 @@ def prepare_leakage_safe_splits(
     train_stationary, val_stationary, test_stationary, stationarity = apply_stationarity_policy(
         train_scaled, val_scaled, test_scaled
     )
-    columns = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
+    columns = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
 
     return PreprocessOutput(
         train=train_stationary[columns],
@@ -236,17 +255,22 @@ def train_val_test_split_time_series(
 def create_exog_candidates(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     x1 = df[CARBON_TICKER]
     x2 = df[IRON_TICKER]
+    x3 = df[FX_TICKER]
     candidates = {
         "x2": pd.DataFrame({IRON_TICKER: x2}, index=df.index),
-        "x1_x2": pd.DataFrame({CARBON_TICKER: x1, IRON_TICKER: x2}, index=df.index),
-        "x1_x2_lag_roll": pd.DataFrame(
+        "x2_x3": pd.DataFrame({IRON_TICKER: x2, FX_TICKER: x3}, index=df.index),
+        "x1_x2_x3": pd.DataFrame({CARBON_TICKER: x1, IRON_TICKER: x2, FX_TICKER: x3}, index=df.index),
+        "x1_x2_x3_lag_roll": pd.DataFrame(
             {
                 CARBON_TICKER: x1,
                 IRON_TICKER: x2,
+                FX_TICKER: x3,
                 f"{CARBON_TICKER}_lag1": x1.shift(1),
                 f"{IRON_TICKER}_lag1": x2.shift(1),
+                f"{FX_TICKER}_lag1": x3.shift(1),
                 f"{CARBON_TICKER}_roll3": x1.rolling(3).mean(),
                 f"{IRON_TICKER}_roll3": x2.rolling(3).mean(),
+                f"{FX_TICKER}_roll3": x3.rolling(3).mean(),
             },
             index=df.index,
         ),
@@ -368,20 +392,28 @@ def build_residual_training_frame(
     x1_train: pd.Series,
     residuals_train: pd.Series,
     x2_train: Optional[pd.Series] = None,
+    x3_train: Optional[pd.Series] = None,
 ) -> Tuple[pd.DataFrame, pd.Series]:
     if x2_train is None:
         x2_train = pd.Series(0.0, index=x1_train.index)
-    X = pd.DataFrame({"x1": x1_train, "x2": x2_train})
+    if x3_train is None:
+        x3_train = pd.Series(0.0, index=x1_train.index)
+    X = pd.DataFrame({"x1": x1_train, "x2": x2_train, "x3": x3_train})
     X["x1_x2_interaction"] = X["x1"] * X["x2"]
+    X["x1_x3_interaction"] = X["x1"] * X["x3"]
+    X["x2_x3_interaction"] = X["x2"] * X["x3"]
     x1_change = x1_train.diff()
     x2_change = x2_train.diff()
+    x3_change = x3_train.diff()
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"residual_lag{lag}"] = residuals_train.shift(lag)
         X[f"x1_lag{lag}"] = x1_train.shift(lag)
         X[f"x2_lag{lag}"] = x2_train.shift(lag)
+        X[f"x3_lag{lag}"] = x3_train.shift(lag)
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
         X[f"x2_change_lag{lag}"] = x2_change.shift(lag)
+        X[f"x3_change_lag{lag}"] = x3_change.shift(lag)
     X["residual_roll_mean_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).mean()
     X["residual_roll_std_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).std()
     X = X.dropna()
@@ -482,15 +514,22 @@ def forecast_mlp_residuals(
     lag_count: int = RESIDUAL_LAG_COUNT,
     x2_test: Optional[pd.Series] = None,
     train_x2_history: Optional[pd.Series] = None,
+    x3_test: Optional[pd.Series] = None,
+    train_x3_history: Optional[pd.Series] = None,
 ) -> pd.Series:
     if x2_test is None:
         x2_test = pd.Series(0.0, index=x1_test.index)
     if train_x2_history is None:
         train_x2_history = pd.Series(0.0, index=train_x1_history.index)
+    if x3_test is None:
+        x3_test = pd.Series(0.0, index=x1_test.index)
+    if train_x3_history is None:
+        train_x3_history = pd.Series(0.0, index=train_x1_history.index)
 
     preds = []
     x1_history = list(train_x1_history.astype(float).values)
     x2_history = list(train_x2_history.astype(float).values)
+    x3_history = list(train_x3_history.astype(float).values)
     residual_history = list(train_residual_history.astype(float).values)
 
     required_x1_len = lag_count + 1
@@ -502,6 +541,10 @@ def forecast_mlp_residuals(
         raise ValueError(
             f"train_x2_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
         )
+    if len(x3_history) < required_x1_len:
+        raise ValueError(
+            f"train_x3_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
+        )
     # En uzun geçmiş ihtiyacı lag_count ve rolling pencere koşullarının maksimumudur.
     required_residual_len = max(lag_count, RESIDUAL_ROLL_WINDOW)
     if len(residual_history) < required_residual_len:
@@ -512,21 +555,25 @@ def forecast_mlp_residuals(
     for i in range(len(x1_test)):
         curr_x1 = float(x1_test.iloc[i])
         curr_x2 = float(x2_test.iloc[i])
+        curr_x3 = float(x3_test.iloc[i])
         x1_change_history = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
         x2_change_history = [x2_history[j] - x2_history[j - 1] for j in range(1, len(x2_history))]
+        x3_change_history = [x3_history[j] - x3_history[j - 1] for j in range(1, len(x3_history))]
         roll_source = (
             residual_history[-RESIDUAL_ROLL_WINDOW:]
             if len(residual_history) >= RESIDUAL_ROLL_WINDOW
             else residual_history
         )
-        features: List[float] = [curr_x1, curr_x2, curr_x1 * curr_x2]
+        features: List[float] = [curr_x1, curr_x2, curr_x3, curr_x1 * curr_x2, curr_x1 * curr_x3, curr_x2 * curr_x3]
 
         for lag in range(1, lag_count + 1):
             features.append(float(residual_history[-lag]))
             features.append(float(x1_history[-lag]))
             features.append(float(x2_history[-lag]))
+            features.append(float(x3_history[-lag]))
             features.append(float(x1_change_history[-lag]))
             features.append(float(x2_change_history[-lag]))
+            features.append(float(x3_change_history[-lag]))
         features.append(float(np.mean(roll_source)))
         features.append(float(np.std(roll_source)))
 
@@ -536,6 +583,7 @@ def forecast_mlp_residuals(
         residual_history.append(pred_res)
         x1_history.append(curr_x1)
         x2_history.append(curr_x2)
+        x3_history.append(curr_x3)
 
     return pd.Series(preds, index=x1_test.index)
 
@@ -662,6 +710,9 @@ def run_single_window_models(
     x2_train = train_df[IRON_TICKER]
     x2_val = val_df[IRON_TICKER]
     x2_test = test_df[IRON_TICKER]
+    x3_train = train_df[FX_TICKER]
+    x3_val = val_df[FX_TICKER]
+    x3_test = test_df[FX_TICKER]
 
     exog_train_candidates = create_exog_candidates(train_df)
     exog_val_candidates = create_exog_candidates(val_df)
@@ -688,8 +739,11 @@ def run_single_window_models(
     residuals_val_actual = y_val - arimax_val_pred
     x1_train_val = pd.concat([x1_train, x1_val])
     x2_train_val = pd.concat([x2_train, x2_val])
+    x3_train_val = pd.concat([x3_train, x3_val])
     residuals_train_val = pd.concat([residuals_train, residuals_val_actual])
-    X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val, x2_train=x2_train_val)
+    X_mlp_all, y_mlp_all = build_residual_training_frame(
+        x1_train_val, residuals_train_val, x2_train=x2_train_val, x3_train=x3_train_val
+    )
     split_labels = pd.concat([pd.Series("train", index=x1_train.index), pd.Series("val", index=x1_val.index)]).loc[X_mlp_all.index]
     X_mlp_train = X_mlp_all.loc[split_labels.eq("train")]
     y_mlp_train = y_mlp_all.loc[split_labels.eq("train")]
@@ -706,16 +760,20 @@ def run_single_window_models(
         mlp_model=mlp_model,
         x1_test=x1_val,
         x2_test=x2_val,
+        x3_test=x3_val,
         train_x1_history=x1_train.tail(RESIDUAL_LAG_COUNT + 1),
         train_x2_history=x2_train.tail(RESIDUAL_LAG_COUNT + 1),
+        train_x3_history=x3_train.tail(RESIDUAL_LAG_COUNT + 1),
         train_residual_history=residuals_train.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
     )
     mlp_residual_test_pred = forecast_mlp_residuals(
         mlp_model=mlp_model,
         x1_test=x1_test,
         x2_test=x2_test,
+        x3_test=x3_test,
         train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 1),
         train_x2_history=x2_train_val.tail(RESIDUAL_LAG_COUNT + 1),
+        train_x3_history=x3_train_val.tail(RESIDUAL_LAG_COUNT + 1),
         train_residual_history=residuals_train_val.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
     )
     combiner = train_hybrid_combiner(
@@ -726,9 +784,9 @@ def run_single_window_models(
     hybrid_pred = apply_hybrid_combiner(combiner, arimax_test_pred, mlp_residual_test_pred)
 
     baseline_model = LinearRegression()
-    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER]]
-    X_val_bench = val_df[[CARBON_TICKER, IRON_TICKER]]
-    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER]]
+    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    X_val_bench = val_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
     baseline_model.fit(X_train_bench, y_train)
     baseline_pred = pd.Series(baseline_model.predict(X_test_bench), index=y_test.index, name="Baseline")
 
@@ -878,9 +936,9 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
         prev_upper = upper
         prev_lower = lower
 
-    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat, USD)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tarih")
-    plt.ylabel("Hisse Fiyatı (TL)")
+    plt.ylabel("Hisse Fiyatı (USD)")
     plt.legend(loc="upper left", ncol=2, fontsize=8)
     plt.tight_layout()
     plt.savefig("Grafik_4_Stres_Testi_Fan.png")
@@ -902,12 +960,12 @@ def run_stress_test(base_price: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def plot_raw_data_summary(df_raw: pd.DataFrame):
-    # 3 satır, 1 sütunluk ortak X eksenli bir figür oluşturuyoruz
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    # 4 satır, 1 sütunluk ortak X eksenli bir figür oluşturuyoruz
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
     
     # 1. Panel: Hedef Değişken (EREGL.IS)
     axes[0].plot(df_raw.index, df_raw[TARGET_TICKER], color="#1f77b4", linewidth=1.5)
-    axes[0].set_title(f"{TARGET_TICKER} - Kapanış Fiyatı (TL)", fontweight="bold", fontsize=11)
+    axes[0].set_title(f"{TARGET_TICKER} - Kapanış Fiyatı (USD standardize)", fontweight="bold", fontsize=11)
     axes[0].set_ylabel("Fiyat")
     
     # 2. Panel: Karbon Fonu (KEUA)
@@ -919,7 +977,12 @@ def plot_raw_data_summary(df_raw: pd.DataFrame):
     axes[2].plot(df_raw.index, df_raw[IRON_TICKER], color="#d62728", linewidth=1.5)
     axes[2].set_title(f"{IRON_TICKER} - Demir Cevheri Vadeli İşlem Fiyatı", fontweight="bold", fontsize=11)
     axes[2].set_ylabel("Fiyat")
-    axes[2].set_xlabel("Tarih")
+
+    # 4. Panel: USD/TRY
+    axes[3].plot(df_raw.index, df_raw[FX_TICKER], color="#9467bd", linewidth=1.5)
+    axes[3].set_title(f"{FX_TICKER} - USD/TRY Kuru", fontweight="bold", fontsize=11)
+    axes[3].set_ylabel("Kur")
+    axes[3].set_xlabel("Tarih")
     
     # Ana Başlık ve Kaydetme İşlemleri
     fig.suptitle("Şekil 3.1: Ham Veri Zaman Serisi Özeti", fontsize=14, fontweight="bold", y=0.98)
@@ -1022,7 +1085,7 @@ def write_thesis_report(
             f"Rolling ortalama iyileşme: {float(success_summary['rolling_mean_improvement']):.4%}",
             f"Sonuç: {'PASS' if bool(success_summary['pass']) else 'FAIL'}",
             "",
-            "8) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
+            "8) STRES TESTİ SONUÇ TABLOSU (GERÇEK USD FİYATI ÜZERİNDEN)",
             "-" * 80,
             stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
             "",
@@ -1036,6 +1099,7 @@ def write_thesis_report(
 def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(interval=interval)
+    df_model = compute_log_returns(df_raw)
 
     print("\n--- Ham Veri Zaman Serisi Özeti ---")
     plot_raw_data_summary(df_raw)
@@ -1050,7 +1114,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     plot_correlation_heatmap(corr_matrix)
 
-    preprocessed = prepare_leakage_safe_splits(df_raw)
+    preprocessed = prepare_leakage_safe_splits(df_model)
     train_df, val_df, test_df = preprocessed.train, preprocessed.val, preprocessed.test
     df_stationary = pd.concat([train_df, val_df, test_df])
     adf_results = preprocessed.stationarity
@@ -1084,7 +1148,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("\nResidual Tanı Testleri (Hibrit Model):")
     print(diagnostics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
-    rolling_summary_df, rolling_window_results_df = run_rolling_backtest(df_raw=df_raw, max_windows=4)
+    rolling_summary_df, rolling_window_results_df = run_rolling_backtest(df_raw=df_model, max_windows=4)
     success_summary = evaluate_success_criteria(metrics_df, rolling_window_results_df)
     print("\n=== Başarı Kriteri Kontrolü ===")
     print(
@@ -1096,7 +1160,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     plot_module_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df, residuals_df=residuals_df)
 
     print("\n=== Modül 5: Karbon Stres Testi ===")
-    # ÇÖZÜM: 0.000 Hatasını önlemek ve gerçekçi sonuç vermek için ham TL fiyatı kullanıldı.
+    # Stres testi, USD standardize edilmiş ham fiyat üzerinden üretilir.
     real_base_price = float(df_raw[TARGET_TICKER].iloc[-1])
     stress_table_df = run_stress_test(base_price=real_base_price)
     plot_stress_test_fan_chart(last_test_date=y_test.index[-1], base_price=real_base_price)
