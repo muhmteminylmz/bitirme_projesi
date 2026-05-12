@@ -131,7 +131,7 @@ def train_val_test_split_time_series(
     val_size = int(n * val_ratio)
 
     if train_size <= 0 or val_size <= 0 or n - train_size - val_size <= 0:
-        raise ValueError("Dataset is insufficient for 70/15/15 split.")
+        raise ValueError("Dataset is too small for the specified split ratios.")
 
     train_df = df.iloc[:train_size].copy()
     val_df = df.iloc[train_size:train_size + val_size].copy()
@@ -540,8 +540,8 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     residuals_train_val = pd.concat([residuals_train, residuals_val])
     X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val)
 
-    train_index_mask = X_mlp_all.index.isin(x1_train.index)
-    val_index_mask = X_mlp_all.index.isin(x1_val.index)
+    train_index_mask = X_mlp_all.index <= train_df.index[-1]
+    val_index_mask = (X_mlp_all.index >= val_df.index[0]) & (X_mlp_all.index <= val_df.index[-1])
     X_mlp_train = X_mlp_all.loc[train_index_mask]
     y_mlp_train = y_mlp_all.loc[train_index_mask]
     X_mlp_val = X_mlp_all.loc[val_index_mask]
