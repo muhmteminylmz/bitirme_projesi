@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TypedDict
+import random
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 import tensorflow as tf
 import yfinance as yf
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
@@ -31,6 +32,13 @@ XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patience": 20, "learning_rate": 0.0005}
 SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT = 0.03
 SUCCESS_MIN_ROLLING_WIN_RATIO = 0.60
+SUCCESS_MIN_ROLLING_MEAN_IMPROVEMENT = 0.0
+OFFICIAL_METRIC = "RMSE"
+SUPPORT_METRIC = "MAE"
+STABLE_RMSE_BAND_UPPER = 0.35
+DEFAULT_SEED = 42
+REPEATED_SEEDS = [42, 123, 2024]
+MAX_ALLOWED_DAILY_RETURN = 0.25
 RESIDUAL_LAG_COUNT = 5
 RESIDUAL_ROLL_WINDOW = 3
 ARIMAX_P_RANGE = range(0, 4)
@@ -58,7 +66,10 @@ SuccessSummary = TypedDict(
         "single_split_improvement": float,
         "rolling_win_ratio": float,
         "rolling_mean_improvement": float,
+        "single_split_rmse": float,
+        "rolling_hybrid_rmse_mean": float,
         "pass": bool,
+        "decision_reason": str,
     },
 )
 
@@ -72,6 +83,11 @@ class PipelineResult:
     stress_table: pd.DataFrame
     rolling_metrics: pd.DataFrame
     success_summary: SuccessSummary
+    acceptance_summary: Dict[str, float | bool | str]
+    diagnostic_baseline: pd.DataFrame
+    module_breakdown: pd.DataFrame
+    ablation_table: pd.DataFrame
+    root_cause_report: str
 
 
 @dataclass
@@ -81,6 +97,54 @@ class PreprocessOutput:
     test: pd.DataFrame
     scaler: MinMaxScaler
     stationarity: Dict[str, Dict[str, float]]
+
+
+def set_global_seed(seed: int = DEFAULT_SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.keras.utils.set_random_seed(seed)
+
+
+def validate_data_quality(df: pd.DataFrame, max_missing_ratio: float = 0.05, max_daily_return: float = MAX_ALLOWED_DAILY_RETURN) -> Dict[str, float | bool]:
+    if df.empty:
+        raise ValueError("Data quality gate failed: raw dataframe is empty.")
+    if not df.index.is_monotonic_increasing:
+        raise ValueError("Data quality gate failed: index is not monotonic increasing.")
+    if not df.index.is_unique:
+        raise ValueError("Data quality gate failed: duplicated timestamps detected.")
+    expected_cols = {TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER}
+    if set(df.columns) != expected_cols:
+        raise ValueError(f"Data quality gate failed: columns must be exactly {sorted(expected_cols)}.")
+
+    missing_ratio = float(df.isna().mean().max())
+    if missing_ratio > max_missing_ratio:
+        raise ValueError(f"Data quality gate failed: missing ratio {missing_ratio:.4f} exceeds threshold {max_missing_ratio:.4f}.")
+
+    non_positive_cols = df.columns[(df <= 0).any()].tolist()
+    if non_positive_cols:
+        raise ValueError(f"Data quality gate failed: non-positive prices in columns: {non_positive_cols}")
+
+    jump_ratio = float((df.pct_change().abs() > max_daily_return).mean().max())
+    return {
+        "missing_ratio_max": missing_ratio,
+        "jump_ratio_max": jump_ratio,
+        "quality_pass": jump_ratio < 0.20,
+    }
+
+
+def validate_split_integrity(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    if train_df.empty or val_df.empty or test_df.empty:
+        raise ValueError("Split integrity failed: one of train/val/test is empty.")
+    if train_df.index.max() >= val_df.index.min():
+        raise ValueError("Split integrity failed: train must end before validation starts.")
+    if val_df.index.max() >= test_df.index.min():
+        raise ValueError("Split integrity failed: validation must end before test starts.")
+    if len(train_df.index.intersection(val_df.index)) > 0:
+        raise ValueError("Split integrity failed: overlap between train and validation.")
+    if len(val_df.index.intersection(test_df.index)) > 0:
+        raise ValueError("Split integrity failed: overlap between validation and test.")
+    if len(train_df.index.intersection(test_df.index)) > 0:
+        raise ValueError("Split integrity failed: overlap between train and test.")
 
 
 def fetch_yfinance_data(
@@ -202,6 +266,7 @@ def prepare_leakage_safe_splits(
     test_ratio: float = 0.15,
 ) -> PreprocessOutput:
     train_raw, val_raw, test_raw = train_val_test_split_time_series(df_raw, train_ratio, val_ratio, test_ratio)
+    validate_split_integrity(train_raw, val_raw, test_raw)
 
     train_clean = train_raw.sort_index().ffill().bfill()
     val_clean = val_raw.sort_index().ffill().bfill()
@@ -215,6 +280,7 @@ def prepare_leakage_safe_splits(
     train_stationary, val_stationary, test_stationary, stationarity = apply_stationarity_policy(
         train_scaled, val_scaled, test_scaled
     )
+    validate_split_integrity(train_stationary, val_stationary, test_stationary)
     columns = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
 
     return PreprocessOutput(
@@ -321,12 +387,15 @@ def fit_sarimax_with_validation(
 
                     val_rmse = float(np.sqrt(mean_squared_error(y_val_aligned, val_pred)))
                     resid = pd.Series(candidate.resid).dropna()
+                    resid_std = float(resid.std()) if not resid.empty else 1.0
                     if len(resid) > 10:
                         lag = min(10, max(1, len(resid) - 1))
                         ljung_box_pvalue = float(acorr_ljungbox(resid, lags=[lag], return_df=True)["lb_pvalue"].iloc[0])
                     else:
                         ljung_box_pvalue = 0.5
-                    score = val_rmse + max(0.0, 0.05 - ljung_box_pvalue)
+                    aic_penalty = float(candidate.aic) * 1e-4 if np.isfinite(candidate.aic) else 1.0
+                    stability_penalty = max(0.0, 0.05 - ljung_box_pvalue) + 0.05 * resid_std
+                    score = val_rmse + stability_penalty + aic_penalty
 
                     if score < best_score:
                         best_score = score
@@ -338,6 +407,8 @@ def fit_sarimax_with_validation(
                             "q": q,
                             "val_rmse": val_rmse,
                             "ljung_box_pvalue": ljung_box_pvalue,
+                            "resid_std": resid_std,
+                            "aic": float(candidate.aic) if np.isfinite(candidate.aic) else np.inf,
                             "score": score,
                         }
 
@@ -350,12 +421,22 @@ def fit_sarimax_with_validation(
             enforce_stationarity=False,
             enforce_invertibility=False,
         ).fit(disp=False)
-        best_meta = {"exog_name": "x2", "p": 1, "d": 0, "q": 1, "val_rmse": 0.0, "ljung_box_pvalue": 0.0, "score": 0.0}
+        best_meta = {
+            "exog_name": "x2",
+            "p": 1,
+            "d": 0,
+            "q": 1,
+            "val_rmse": 0.0,
+            "ljung_box_pvalue": 0.0,
+            "resid_std": 0.0,
+            "aic": 0.0,
+            "score": 0.0,
+        }
 
     print(
         f"Seçilen ARIMAX: exog={best_meta['exog_name']}, "
         f"order=({best_meta['p']},{best_meta['d']},{best_meta['q']}), "
-        f"val_rmse={best_meta['val_rmse']}"
+        f"val_rmse={best_meta['val_rmse']}, score={best_meta['score']}"
     )
     return best_model, best_meta
 
@@ -396,6 +477,7 @@ def build_residual_training_frame(
     residuals_train: pd.Series,
     x2_train: Optional[pd.Series] = None,
     x3_train: Optional[pd.Series] = None,
+    feature_mode: str = "full",
 ) -> Tuple[pd.DataFrame, pd.Series]:
     if x2_train is None:
         x2_train = pd.Series(0.0, index=x1_train.index)
@@ -403,17 +485,19 @@ def build_residual_training_frame(
         x3_train = pd.Series(0.0, index=x1_train.index)
     X = pd.DataFrame({"x1": x1_train, "x2": x2_train, "x3": x3_train})
     X["x1_x2_interaction"] = X["x1"] * X["x2"]
-    X["x1_x3_interaction"] = X["x1"] * X["x3"]
-    X["x2_x3_interaction"] = X["x2"] * X["x3"]
+    if feature_mode == "full":
+        X["x1_x3_interaction"] = X["x1"] * X["x3"]
+        X["x2_x3_interaction"] = X["x2"] * X["x3"]
     x1_change = x1_train.diff()
     x2_change = x2_train.diff()
     x3_change = x3_train.diff()
-    for lag in range(1, RESIDUAL_LAG_COUNT + 1):
+    lag_count = 3 if feature_mode == "compact" else RESIDUAL_LAG_COUNT
+    for lag in range(1, lag_count + 1):
         X[f"residual_lag{lag}"] = residuals_train.shift(lag)
         X[f"x1_lag{lag}"] = x1_train.shift(lag)
         X[f"x2_lag{lag}"] = x2_train.shift(lag)
         X[f"x3_lag{lag}"] = x3_train.shift(lag)
-    for lag in range(1, RESIDUAL_LAG_COUNT + 1):
+    for lag in range(1, lag_count + 1):
         X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
         X[f"x2_change_lag{lag}"] = x2_change.shift(lag)
         X[f"x3_change_lag{lag}"] = x3_change.shift(lag)
@@ -486,9 +570,10 @@ def select_best_mlp_model(
     ]
     seeds = [42, 123]
     best_model = None
-    best_rmse = np.inf
+    best_score = np.inf
     evaluated: List[Tuple[dict, int, float]] = []
     for config in search_space:
+        config_runs: List[Tuple[float, object]] = []
         for seed in seeds:
             model = build_and_train_mlp(
                 X_train=X_train,
@@ -501,9 +586,13 @@ def select_best_mlp_model(
             pred = model.predict(X_val, verbose=0).ravel()
             rmse = float(np.sqrt(mean_squared_error(y_val, pred)))
             evaluated.append((config, seed, rmse))
-            if rmse < best_rmse:
-                best_rmse = rmse
-                best_model = model
+            config_runs.append((rmse, model))
+        mean_rmse = float(np.mean([x[0] for x in config_runs]))
+        std_rmse = float(np.std([x[0] for x in config_runs]))
+        score = mean_rmse + 0.10 * std_rmse
+        if score < best_score:
+            best_score = score
+            best_model = sorted(config_runs, key=lambda x: x[0])[0][1]
     if best_model is None:
         raise RuntimeError(f"MLP model selection failed. Tried {len(evaluated)} config/seed combinations.")
     return best_model
@@ -595,7 +684,7 @@ def train_hybrid_combiner(
     y_val: pd.Series,
     arimax_val_pred: pd.Series,
     mlp_val_residual_pred: pd.Series,
-) -> LinearRegression:
+) -> RidgeCV:
     X_meta = pd.DataFrame(
         {
             "arimax": arimax_val_pred,
@@ -603,13 +692,13 @@ def train_hybrid_combiner(
         },
         index=y_val.index,
     )
-    model = LinearRegression()
+    model = RidgeCV(alphas=np.array([0.01, 0.1, 1.0, 10.0]))
     model.fit(X_meta, y_val)
     return model
 
 
 def apply_hybrid_combiner(
-    model: LinearRegression,
+    model,
     arimax_pred: pd.Series,
     mlp_residual_pred: pd.Series,
 ) -> pd.Series:
@@ -637,11 +726,21 @@ def evaluate_success_criteria(
     rolling_window_results_df: pd.DataFrame,
     min_single_split_improvement: float = SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT,
     min_rolling_win_ratio: float = SUCCESS_MIN_ROLLING_WIN_RATIO,
+    min_rolling_mean_improvement: float = SUCCESS_MIN_ROLLING_MEAN_IMPROVEMENT,
+    stable_rmse_upper: float = STABLE_RMSE_BAND_UPPER,
 ) -> SuccessSummary:
     sorted_metrics = metrics_df.sort_values("RMSE").reset_index(drop=True)
     hybrid_row = sorted_metrics[sorted_metrics["Model"] == "Hibrit ARIMAX-MLP"]
     if hybrid_row.empty:
-        return {"single_split_improvement": 0.0, "rolling_win_ratio": 0.0, "rolling_mean_improvement": 0.0, "pass": False}
+        return {
+            "single_split_improvement": 0.0,
+            "rolling_win_ratio": 0.0,
+            "rolling_mean_improvement": 0.0,
+            "single_split_rmse": float("inf"),
+            "rolling_hybrid_rmse_mean": float("inf"),
+            "pass": False,
+            "decision_reason": "Hybrid row missing in metrics table.",
+        }
 
     hybrid_rmse = float(hybrid_row.iloc[0]["RMSE"])
     baseline_comp = sorted_metrics[sorted_metrics["Model"] != "Hibrit ARIMAX-MLP"].iloc[0]
@@ -666,12 +765,34 @@ def evaluate_success_criteria(
 
     rolling_win_ratio = (hybrid_wins / total_windows) if total_windows else 0.0
     rolling_mean_improvement = float(np.mean(rolling_improvements)) if rolling_improvements else 0.0
-    criteria_pass = single_split_improvement >= min_single_split_improvement and rolling_win_ratio >= min_rolling_win_ratio
+    rolling_hybrid = rolling_window_results_df[rolling_window_results_df["Model"] == "Hibrit ARIMAX-MLP"]
+    rolling_hybrid_rmse_mean = float(rolling_hybrid["RMSE"].mean()) if not rolling_hybrid.empty else float("inf")
+    criteria_pass = (
+        single_split_improvement >= min_single_split_improvement
+        and rolling_win_ratio >= min_rolling_win_ratio
+        and rolling_mean_improvement >= min_rolling_mean_improvement
+        and hybrid_rmse <= stable_rmse_upper
+        and rolling_hybrid_rmse_mean <= stable_rmse_upper
+    )
+    decision_reason = (
+        "PASS"
+        if criteria_pass
+        else (
+            f"FAIL: split_improvement={single_split_improvement:.4f}, "
+            f"rolling_win_ratio={rolling_win_ratio:.4f}, "
+            f"rolling_mean_improvement={rolling_mean_improvement:.4f}, "
+            f"single_split_rmse={hybrid_rmse:.4f}, "
+            f"rolling_rmse_mean={rolling_hybrid_rmse_mean:.4f}"
+        )
+    )
     return {
         "single_split_improvement": float(single_split_improvement),
         "rolling_win_ratio": float(rolling_win_ratio),
         "rolling_mean_improvement": float(rolling_mean_improvement),
+        "single_split_rmse": float(hybrid_rmse),
+        "rolling_hybrid_rmse_mean": float(rolling_hybrid_rmse_mean),
         "pass": bool(criteria_pass),
+        "decision_reason": decision_reason,
     }
 
 
@@ -745,7 +866,7 @@ def run_single_window_models(
     x3_train_val = pd.concat([x3_train, x3_val])
     residuals_train_val = pd.concat([residuals_train, residuals_val_actual])
     X_mlp_all, y_mlp_all = build_residual_training_frame(
-        x1_train_val, residuals_train_val, x2_train=x2_train_val, x3_train=x3_train_val
+        x1_train_val, residuals_train_val, x2_train=x2_train_val, x3_train=x3_train_val, feature_mode="compact"
     )
     split_labels = pd.concat([pd.Series("train", index=x1_train.index), pd.Series("val", index=x1_val.index)]).loc[X_mlp_all.index]
     X_mlp_train = X_mlp_all.loc[split_labels.eq("train")]
@@ -814,11 +935,13 @@ def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd
     )
     rolling_rows: List[pd.DataFrame] = []
     for i, (train_raw, val_raw, test_raw) in enumerate(windows, start=1):
+        validate_split_integrity(train_raw, val_raw, test_raw)
         scaler = MinMaxScaler()
         train_scaled = pd.DataFrame(scaler.fit_transform(train_raw), columns=train_raw.columns, index=train_raw.index)
         val_scaled = pd.DataFrame(scaler.transform(val_raw), columns=val_raw.columns, index=val_raw.index)
         test_scaled = pd.DataFrame(scaler.transform(test_raw), columns=test_raw.columns, index=test_raw.index)
         train_df, val_df, test_df, _ = apply_stationarity_policy(train_scaled, val_scaled, test_scaled)
+        validate_split_integrity(train_df, val_df, test_df)
         if len(train_df) < ROLLING_MIN_TRAIN_ROWS or len(val_df) < ROLLING_MIN_VAL_ROWS or len(test_df) < ROLLING_MIN_TEST_ROWS:
             continue
         y_test, preds, _, _ = run_single_window_models(train_df, val_df, test_df)
@@ -848,6 +971,71 @@ def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd
         .reset_index(drop=True)
     )
     return summary, rolling_window_results
+
+
+def build_module_breakdown(y_true: pd.Series, predictions: Dict[str, pd.Series], rolling_summary_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, float | str]] = []
+    ordered_models = ["Baseline", "ARIMAX", "XGBoost", "Hibrit ARIMAX-MLP"]
+    for model in ordered_models:
+        if model in predictions:
+            rmse = float(np.sqrt(mean_squared_error(y_true, predictions[model])))
+            rows.append({"module": model, "rmse": rmse})
+    hybrid_rolling = rolling_summary_df[rolling_summary_df["Model"] == "Hibrit ARIMAX-MLP"]
+    if not hybrid_rolling.empty:
+        rows.append({"module": "Rolling(Hibrit mean)", "rmse": float(hybrid_rolling.iloc[0]["RMSE_mean"])})
+    return pd.DataFrame(rows)
+
+
+def find_first_breakpoint(module_breakdown: pd.DataFrame, threshold: float = STABLE_RMSE_BAND_UPPER) -> str:
+    if module_breakdown.empty:
+        return "Kırılma analizi yapılamadı: modül metriği boş."
+    over = module_breakdown[module_breakdown["rmse"] > threshold]
+    if over.empty:
+        return f"Kırılma yok: tüm modüller RMSE<{threshold:.3f} bandında."
+    first = over.iloc[0]
+    return f"İlk kırılma noktası: {first['module']} (RMSE={float(first['rmse']):.4f}, eşik={threshold:.4f})"
+
+
+def run_diagnostic_baseline(
+    df_model: pd.DataFrame,
+    seeds: List[int] = REPEATED_SEEDS,
+) -> pd.DataFrame:
+    rows: List[Dict[str, float | int]] = []
+    for seed in seeds:
+        set_global_seed(seed)
+        splits = prepare_leakage_safe_splits(df_model)
+        y_test, predictions, _, _ = run_single_window_models(splits.train, splits.val, splits.test)
+        metrics_df = calculate_metrics(y_test, predictions)
+        hybrid_rmse = float(metrics_df.loc[metrics_df["Model"] == "Hibrit ARIMAX-MLP", "RMSE"].iloc[0])
+        hybrid_mae = float(metrics_df.loc[metrics_df["Model"] == "Hibrit ARIMAX-MLP", "MAE"].iloc[0])
+        rows.append({"seed": seed, "RMSE": hybrid_rmse, "MAE": hybrid_mae})
+    out = pd.DataFrame(rows)
+    out["RMSE_mean"] = out["RMSE"].mean()
+    out["RMSE_std"] = out["RMSE"].std(ddof=0)
+    return out
+
+
+def run_ablation_experiments(
+    y_test: pd.Series,
+    predictions: Dict[str, pd.Series],
+) -> pd.DataFrame:
+    rows = []
+    candidates = {
+        "A_ARIMAX_only": ["ARIMAX"],
+        "B_ARIMAX_plus_linear_baseline": ["ARIMAX", "Baseline"],
+        "C_XGBoost_only": ["XGBoost"],
+        "D_Hybrid_enabled": ["Hibrit ARIMAX-MLP"],
+        "E_All_models_ensemble_mean": ["Baseline", "ARIMAX", "XGBoost", "Hibrit ARIMAX-MLP"],
+    }
+    for name, model_names in candidates.items():
+        selected = [predictions[m] for m in model_names if m in predictions]
+        if not selected:
+            continue
+        combined_pred = pd.concat(selected, axis=1).mean(axis=1)
+        rmse = float(np.sqrt(mean_squared_error(y_test, combined_pred)))
+        mae = float(mean_absolute_error(y_test, combined_pred))
+        rows.append({"Variant": name, "RMSE": rmse, "MAE": mae, "ModelCount": len(selected)})
+    return pd.DataFrame(rows).sort_values("RMSE").reset_index(drop=True)
 
 
 def plot_module_visualizations(
@@ -1029,6 +1217,11 @@ def write_thesis_report(
     metrics_df: pd.DataFrame,
     rolling_summary_df: pd.DataFrame,
     success_summary: SuccessSummary,
+    acceptance_summary: Dict[str, float | bool | str],
+    diagnostic_baseline_df: pd.DataFrame,
+    module_breakdown_df: pd.DataFrame,
+    ablation_df: pd.DataFrame,
+    root_cause_report: str,
     stress_table_df: pd.DataFrame,
     report_path: Path,
 ):
@@ -1077,21 +1270,44 @@ def write_thesis_report(
             "-" * 80,
             metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "6) ROLLING BACKTEST ÖZETİ (RMSE ortalama / std / kazanılan pencere)",
-            "-" * 80,
-            rolling_summary_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
-            "",
-            "7) BAŞARI KRİTERİ KONTROLÜ (AÇIK ARA BİRİNCİLİK)",
-            "-" * 80,
-            f"Tek split iyileşme oranı: {float(success_summary['single_split_improvement']):.4%}",
-            f"Rolling pencere kazanma oranı: {float(success_summary['rolling_win_ratio']):.4%}",
-            f"Rolling ortalama iyileşme: {float(success_summary['rolling_mean_improvement']):.4%}",
-            f"Sonuç: {'PASS' if bool(success_summary['pass']) else 'FAIL'}",
-            "",
-            "8) STRES TESTİ SONUÇ TABLOSU (GERÇEK USD FİYATI ÜZERİNDEN)",
-            "-" * 80,
-            stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
-            "",
+             "6) ROLLING BACKTEST ÖZETİ (RMSE ortalama / std / kazanılan pencere)",
+             "-" * 80,
+             rolling_summary_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+             "",
+             "7) BAŞARI KRİTERİ KONTROLÜ (ANA METRİK RMSE + ROLLING KURALI)",
+             "-" * 80,
+             f"Tek split iyileşme oranı: {float(success_summary['single_split_improvement']):.4%}",
+             f"Rolling pencere kazanma oranı: {float(success_summary['rolling_win_ratio']):.4%}",
+             f"Rolling ortalama iyileşme: {float(success_summary['rolling_mean_improvement']):.4%}",
+             f"Tek split RMSE: {float(success_summary['single_split_rmse']):.6f}",
+             f"Rolling Hibrit RMSE ortalaması: {float(success_summary['rolling_hybrid_rmse_mean']):.6f}",
+             f"Karar nedeni: {success_summary['decision_reason']}",
+             f"Sonuç: {'PASS' if bool(success_summary['pass']) else 'FAIL'}",
+             "",
+             "8) KABUL EŞİĞİ / RESMİ HEDEF ÖZETİ",
+             "-" * 80,
+             f"Resmi metrik: {acceptance_summary['official_metric']}",
+             f"Destek metrik: {acceptance_summary['support_metric']}",
+             f"Stabil RMSE üst bant: {float(acceptance_summary['stable_rmse_upper']):.6f}",
+             f"Kural sonucu: {'PASS' if bool(acceptance_summary['pass']) else 'FAIL'}",
+             "",
+             "9) DİAGNOSTİK BASELINE (SEED TEKRARLI KOŞU)",
+             "-" * 80,
+             diagnostic_baseline_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+             "",
+             "10) MODÜL BAZLI AYRIŞTIRMA VE KIRILMA NOKTASI",
+             "-" * 80,
+             module_breakdown_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+             root_cause_report,
+             "",
+             "11) ABLATION KARŞILAŞTIRMA TABLOSU",
+             "-" * 80,
+             ablation_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+             "",
+             "12) STRES TESTİ SONUÇ TABLOSU (GERÇEK USD FİYATI ÜZERİNDEN)",
+             "-" * 80,
+             stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
+             "",
         ]
     )
 
@@ -1100,8 +1316,14 @@ def write_thesis_report(
 
 
 def run_pipeline(interval: str = "1d") -> PipelineResult:
+    set_global_seed(DEFAULT_SEED)
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(interval=interval)
+    quality_report = validate_data_quality(df_raw)
+    if not bool(quality_report["quality_pass"]):
+        raise ValueError(
+            f"Data quality gate failed: jump_ratio_max={quality_report['jump_ratio_max']:.4f} exceeds acceptance policy."
+        )
     df_model = compute_log_returns(df_raw)
 
     print("\n--- Ham Veri Zaman Serisi Özeti ---")
@@ -1119,6 +1341,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     preprocessed = prepare_leakage_safe_splits(df_model)
     train_df, val_df, test_df = preprocessed.train, preprocessed.val, preprocessed.test
+    validate_split_integrity(train_df, val_df, test_df)
     df_stationary = pd.concat([train_df, val_df, test_df])
     adf_results = preprocessed.stationarity
 
@@ -1153,12 +1376,24 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     rolling_summary_df, rolling_window_results_df = run_rolling_backtest(df_raw=df_model, max_windows=4)
     success_summary = evaluate_success_criteria(metrics_df, rolling_window_results_df)
+    acceptance_summary = {
+        "official_metric": OFFICIAL_METRIC,
+        "support_metric": SUPPORT_METRIC,
+        "stable_rmse_upper": STABLE_RMSE_BAND_UPPER,
+        "pass": bool(success_summary["pass"]),
+    }
+    diagnostic_baseline_df = run_diagnostic_baseline(df_model, seeds=REPEATED_SEEDS)
+    module_breakdown_df = build_module_breakdown(y_test, predictions, rolling_summary_df)
+    root_cause_report = find_first_breakpoint(module_breakdown_df, threshold=STABLE_RMSE_BAND_UPPER)
+    ablation_df = run_ablation_experiments(y_test, predictions)
     print("\n=== Başarı Kriteri Kontrolü ===")
     print(
         f"Tek split iyileşme: {success_summary['single_split_improvement']:.2%} | "
         f"Rolling kazanma oranı: {success_summary['rolling_win_ratio']:.2%} | "
-        f"PASS: {success_summary['pass']}"
+        f"PASS: {success_summary['pass']} | {success_summary['decision_reason']}"
     )
+    print("\n=== Teşhis Özeti ===")
+    print(root_cause_report)
 
     plot_module_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df, residuals_df=residuals_df)
 
@@ -1180,6 +1415,11 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
         metrics_df=metrics_df,
         rolling_summary_df=rolling_summary_df,
         success_summary=success_summary,
+        acceptance_summary=acceptance_summary,
+        diagnostic_baseline_df=diagnostic_baseline_df,
+        module_breakdown_df=module_breakdown_df,
+        ablation_df=ablation_df,
+        root_cause_report=root_cause_report,
         stress_table_df=stress_table_df,
         report_path=Path.cwd() / "Tez_Bulgulari_Raporu.txt",
     )
@@ -1192,6 +1432,11 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
         stress_table=stress_table_df,
         rolling_metrics=rolling_summary_df,
         success_summary=success_summary,
+        acceptance_summary=acceptance_summary,
+        diagnostic_baseline=diagnostic_baseline_df,
+        module_breakdown=module_breakdown_df,
+        ablation_table=ablation_df,
+        root_cause_report=root_cause_report,
     )
 
 
