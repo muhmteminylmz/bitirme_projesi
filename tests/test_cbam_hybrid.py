@@ -147,6 +147,14 @@ def test_build_residual_training_frame_creates_lagged_feature():
     assert X.loc[first_idx, "x1_x2_interaction"] == X.loc[first_idx, "x1"] * X.loc[first_idx, "x2"]
 
 
+def test_build_residual_training_frame_rejects_invalid_feature_mode():
+    idx = pd.date_range("2024-01-01", periods=12, freq="D")
+    x1 = pd.Series(np.linspace(0.1, 1.2, 12), index=idx)
+    residuals = pd.Series(np.linspace(-0.1, 0.1, 12), index=idx)
+    with pytest.raises(ValueError):
+        build_residual_training_frame(x1, residuals, feature_mode="invalid")
+
+
 def test_calculate_metrics_returns_rmse_mae_for_all_models():
     idx = pd.date_range("2024-01-01", periods=4, freq="D")
     y_true = pd.Series([0.2, 0.3, 0.4, 0.5], index=idx)
@@ -289,7 +297,7 @@ def test_success_criteria_fails_when_rolling_is_bad_even_if_single_split_good():
     assert out["pass"] is False
 
 
-def test_ablation_and_breakpoint_outputs():
+def test_ablation_experiments_output():
     idx = pd.date_range("2024-01-01", periods=5, freq="D")
     y_true = pd.Series([1, 2, 3, 4, 5], index=idx, dtype=float)
     predictions = {
@@ -301,7 +309,23 @@ def test_ablation_and_breakpoint_outputs():
     rolling_summary = pd.DataFrame([{"Model": "Hibrit ARIMAX-MLP", "RMSE_mean": 0.5, "RMSE_std": 0.1, "wins": 2}])
     ablation = run_ablation_experiments(y_true, predictions)
     assert not ablation.empty
+    assert "Variant" in ablation.columns
+    assert float(ablation.iloc[0]["RMSE"]) <= float(ablation.iloc[-1]["RMSE"])
+
+
+def test_breakpoint_detection_output():
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    y_true = pd.Series([1, 2, 3, 4, 5], index=idx, dtype=float)
+    predictions = {
+        "Baseline": pd.Series([1.4, 2.3, 3.2, 3.7, 4.5], index=idx),
+        "ARIMAX": pd.Series([1.2, 2.1, 2.9, 4.1, 5.1], index=idx),
+        "XGBoost": pd.Series([1.3, 2.2, 3.0, 3.9, 4.8], index=idx),
+        "Hibrit ARIMAX-MLP": pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=idx),
+    }
+    rolling_summary = pd.DataFrame([{"Model": "Hibrit ARIMAX-MLP", "RMSE_mean": 0.5, "RMSE_std": 0.1, "wins": 2}])
     breakdown = build_module_breakdown(y_true, predictions, rolling_summary)
     assert "module" in breakdown.columns and "rmse" in breakdown.columns
-    report = find_first_breakpoint(breakdown, threshold=0.01)
+    report = find_first_breakpoint(breakdown, threshold=0.2)
     assert "İlk kırılma noktası" in report
+    first_break_module = breakdown[breakdown["rmse"] > 0.2].iloc[0]["module"]
+    assert first_break_module in report

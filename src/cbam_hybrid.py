@@ -13,6 +13,9 @@ import pandas as pd
 import seaborn as sns
 import tensorflow as tf
 import yfinance as yf
+from src.data_layer import assert_split_integrity, quality_gate
+from src.evaluation_layer import acceptance_summary as build_acceptance_summary
+from src.reporting_layer import first_breakpoint_report
 from sklearn.linear_model import LinearRegression, RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
@@ -32,13 +35,19 @@ XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patience": 20, "learning_rate": 0.0005}
 SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT = 0.03
 SUCCESS_MIN_ROLLING_WIN_RATIO = 0.60
-SUCCESS_MIN_ROLLING_MEAN_IMPROVEMENT = 0.0
+SUCCESS_MIN_ROLLING_MEAN_DELTA = 0.0
 OFFICIAL_METRIC = "RMSE"
 SUPPORT_METRIC = "MAE"
 STABLE_RMSE_BAND_UPPER = 0.35
 DEFAULT_SEED = 42
 REPEATED_SEEDS = [42, 123, 2024]
 MAX_ALLOWED_DAILY_RETURN = 0.25
+AIC_SCALING_FACTOR = 1e-4
+AIC_FALLBACK_PENALTY = 1.0
+LJUNG_BOX_PENALTY_THRESHOLD = 0.05
+RESID_STD_WEIGHT = 0.05
+MLP_STD_RMSE_WEIGHT = 0.10
+RIDGE_CV_ALPHAS = np.array([0.01, 0.1, 1.0, 10.0])
 RESIDUAL_LAG_COUNT = 5
 RESIDUAL_ROLL_WINDOW = 3
 ARIMAX_P_RANGE = range(0, 4)
@@ -106,45 +115,12 @@ def set_global_seed(seed: int = DEFAULT_SEED) -> None:
 
 
 def validate_data_quality(df: pd.DataFrame, max_missing_ratio: float = 0.05, max_daily_return: float = MAX_ALLOWED_DAILY_RETURN) -> Dict[str, float | bool]:
-    if df.empty:
-        raise ValueError("Data quality gate failed: raw dataframe is empty.")
-    if not df.index.is_monotonic_increasing:
-        raise ValueError("Data quality gate failed: index is not monotonic increasing.")
-    if not df.index.is_unique:
-        raise ValueError("Data quality gate failed: duplicated timestamps detected.")
-    expected_cols = {TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER}
-    if set(df.columns) != expected_cols:
-        raise ValueError(f"Data quality gate failed: columns must be exactly {sorted(expected_cols)}.")
-
-    missing_ratio = float(df.isna().mean().max())
-    if missing_ratio > max_missing_ratio:
-        raise ValueError(f"Data quality gate failed: missing ratio {missing_ratio:.4f} exceeds threshold {max_missing_ratio:.4f}.")
-
-    non_positive_cols = df.columns[(df <= 0).any()].tolist()
-    if non_positive_cols:
-        raise ValueError(f"Data quality gate failed: non-positive prices in columns: {non_positive_cols}")
-
-    jump_ratio = float((df.pct_change().abs() > max_daily_return).mean().max())
-    return {
-        "missing_ratio_max": missing_ratio,
-        "jump_ratio_max": jump_ratio,
-        "quality_pass": jump_ratio < 0.20,
-    }
+    expected_cols = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
+    return quality_gate(df, required_columns=expected_cols, max_missing_ratio=max_missing_ratio, max_daily_return=max_daily_return)
 
 
 def validate_split_integrity(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
-    if train_df.empty or val_df.empty or test_df.empty:
-        raise ValueError("Split integrity failed: one of train/val/test is empty.")
-    if train_df.index.max() >= val_df.index.min():
-        raise ValueError("Split integrity failed: train must end before validation starts.")
-    if val_df.index.max() >= test_df.index.min():
-        raise ValueError("Split integrity failed: validation must end before test starts.")
-    if len(train_df.index.intersection(val_df.index)) > 0:
-        raise ValueError("Split integrity failed: overlap between train and validation.")
-    if len(val_df.index.intersection(test_df.index)) > 0:
-        raise ValueError("Split integrity failed: overlap between validation and test.")
-    if len(train_df.index.intersection(test_df.index)) > 0:
-        raise ValueError("Split integrity failed: overlap between train and test.")
+    assert_split_integrity(train_df, val_df, test_df)
 
 
 def fetch_yfinance_data(
@@ -393,8 +369,10 @@ def fit_sarimax_with_validation(
                         ljung_box_pvalue = float(acorr_ljungbox(resid, lags=[lag], return_df=True)["lb_pvalue"].iloc[0])
                     else:
                         ljung_box_pvalue = 0.5
-                    aic_penalty = float(candidate.aic) * 1e-4 if np.isfinite(candidate.aic) else 1.0
-                    stability_penalty = max(0.0, 0.05 - ljung_box_pvalue) + 0.05 * resid_std
+                    aic_penalty = (
+                        float(candidate.aic) * AIC_SCALING_FACTOR if np.isfinite(candidate.aic) else AIC_FALLBACK_PENALTY
+                    )
+                    stability_penalty = max(0.0, LJUNG_BOX_PENALTY_THRESHOLD - ljung_box_pvalue) + RESID_STD_WEIGHT * resid_std
                     score = val_rmse + stability_penalty + aic_penalty
 
                     if score < best_score:
@@ -479,11 +457,14 @@ def build_residual_training_frame(
     x3_train: Optional[pd.Series] = None,
     feature_mode: str = "full",
 ) -> Tuple[pd.DataFrame, pd.Series]:
+    if feature_mode not in {"full", "compact"}:
+        raise ValueError(f"Invalid feature_mode: {feature_mode}. Must be one of: full, compact")
     if x2_train is None:
         x2_train = pd.Series(0.0, index=x1_train.index)
     if x3_train is None:
         x3_train = pd.Series(0.0, index=x1_train.index)
     X = pd.DataFrame({"x1": x1_train, "x2": x2_train, "x3": x3_train})
+    # x1-x2 etkileşimi modelin temel senaryosunda zorunlu tutulur.
     X["x1_x2_interaction"] = X["x1"] * X["x2"]
     if feature_mode == "full":
         X["x1_x3_interaction"] = X["x1"] * X["x3"]
@@ -589,7 +570,7 @@ def select_best_mlp_model(
             config_runs.append((rmse, model))
         mean_rmse = float(np.mean([x[0] for x in config_runs]))
         std_rmse = float(np.std([x[0] for x in config_runs]))
-        score = mean_rmse + 0.10 * std_rmse
+        score = mean_rmse + MLP_STD_RMSE_WEIGHT * std_rmse
         if score < best_score:
             best_score = score
             best_model = sorted(config_runs, key=lambda x: x[0])[0][1]
@@ -692,7 +673,7 @@ def train_hybrid_combiner(
         },
         index=y_val.index,
     )
-    model = RidgeCV(alphas=np.array([0.01, 0.1, 1.0, 10.0]))
+    model = RidgeCV(alphas=RIDGE_CV_ALPHAS)
     model.fit(X_meta, y_val)
     return model
 
@@ -726,7 +707,7 @@ def evaluate_success_criteria(
     rolling_window_results_df: pd.DataFrame,
     min_single_split_improvement: float = SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT,
     min_rolling_win_ratio: float = SUCCESS_MIN_ROLLING_WIN_RATIO,
-    min_rolling_mean_improvement: float = SUCCESS_MIN_ROLLING_MEAN_IMPROVEMENT,
+    min_rolling_mean_improvement: float = SUCCESS_MIN_ROLLING_MEAN_DELTA,
     stable_rmse_upper: float = STABLE_RMSE_BAND_UPPER,
 ) -> SuccessSummary:
     sorted_metrics = metrics_df.sort_values("RMSE").reset_index(drop=True)
@@ -987,13 +968,7 @@ def build_module_breakdown(y_true: pd.Series, predictions: Dict[str, pd.Series],
 
 
 def find_first_breakpoint(module_breakdown: pd.DataFrame, threshold: float = STABLE_RMSE_BAND_UPPER) -> str:
-    if module_breakdown.empty:
-        return "Kırılma analizi yapılamadı: modül metriği boş."
-    over = module_breakdown[module_breakdown["rmse"] > threshold]
-    if over.empty:
-        return f"Kırılma yok: tüm modüller RMSE<{threshold:.3f} bandında."
-    first = over.iloc[0]
-    return f"İlk kırılma noktası: {first['module']} (RMSE={float(first['rmse']):.4f}, eşik={threshold:.4f})"
+    return first_breakpoint_report(module_breakdown, threshold)
 
 
 def run_diagnostic_baseline(
@@ -1243,8 +1218,8 @@ def write_thesis_report(
         "1b) Korelasyon Matrisi (Ham Kapanış Fiyatları):",
         corr_matrix.to_string(float_format=lambda x: f"{x:.6f}"),
         "",
-             "2) ADF TEST SONUÇLARI (YALNIZCA EĞİTİM BÖLÜMÜ REFERANSLI)",
-             "-" * 80,
+            "2) ADF TEST SONUÇLARI (YALNIZCA EĞİTİM BÖLÜMÜ REFERANSLI)",
+            "-" * 80,
     ]
     for col, result in adf_results.items():
         lines.append(
@@ -1321,9 +1296,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     df_raw = fetch_yfinance_data(interval=interval)
     quality_report = validate_data_quality(df_raw)
     if not bool(quality_report["quality_pass"]):
-        raise ValueError(
-            f"Data quality gate failed: jump_ratio_max={quality_report['jump_ratio_max']:.4f} exceeds acceptance policy."
-        )
+        raise ValueError(f"Data quality gate failed with report: {quality_report}")
     df_model = compute_log_returns(df_raw)
 
     print("\n--- Ham Veri Zaman Serisi Özeti ---")
@@ -1376,12 +1349,12 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     rolling_summary_df, rolling_window_results_df = run_rolling_backtest(df_raw=df_model, max_windows=4)
     success_summary = evaluate_success_criteria(metrics_df, rolling_window_results_df)
-    acceptance_summary = {
-        "official_metric": OFFICIAL_METRIC,
-        "support_metric": SUPPORT_METRIC,
-        "stable_rmse_upper": STABLE_RMSE_BAND_UPPER,
-        "pass": bool(success_summary["pass"]),
-    }
+    acceptance_summary = build_acceptance_summary(
+        official_metric=OFFICIAL_METRIC,
+        support_metric=SUPPORT_METRIC,
+        stable_rmse_upper=STABLE_RMSE_BAND_UPPER,
+        success_pass=bool(success_summary["pass"]),
+    )
     diagnostic_baseline_df = run_diagnostic_baseline(df_model, seeds=REPEATED_SEEDS)
     module_breakdown_df = build_module_breakdown(y_test, predictions, rolling_summary_df)
     root_cause_report = find_first_breakpoint(module_breakdown_df, threshold=STABLE_RMSE_BAND_UPPER)
