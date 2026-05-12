@@ -189,7 +189,7 @@ def build_and_train_mlp(
     )
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
 
-    has_validation = X_val is not None and y_val is not None and len(X_val) > 0
+    has_validation = X_val is not None and y_val is not None and len(X_val) > 0 and len(X_val) == len(y_val)
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss" if has_validation else "loss",
         patience=MLP_PARAMS["patience"],
@@ -540,8 +540,11 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     residuals_train_val = pd.concat([residuals_train, residuals_val])
     X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val)
 
-    train_index_mask = X_mlp_all.index <= train_df.index[-1]
-    val_index_mask = (X_mlp_all.index >= val_df.index[0]) & (X_mlp_all.index <= val_df.index[-1])
+    split_labels = pd.concat(
+        [pd.Series("train", index=x1_train.index), pd.Series("val", index=x1_val.index)]
+    ).loc[X_mlp_all.index]
+    train_index_mask = split_labels.eq("train")
+    val_index_mask = split_labels.eq("val")
     X_mlp_train = X_mlp_all.loc[train_index_mask]
     y_mlp_train = y_mlp_all.loc[train_index_mask]
     X_mlp_val = X_mlp_all.loc[val_index_mask]
