@@ -78,7 +78,8 @@ def test_train_val_test_split_time_series_keeps_order_and_sizes():
 def test_build_residual_training_frame_creates_lagged_feature():
     idx = pd.date_range("2024-01-01", periods=12, freq="D")
     x1 = pd.Series(np.linspace(0.1, 1.2, 12), index=idx)
-    residuals = pd.Series([0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 0.05, -0.05, 0.15, -0.15, 0.1, -0.1], index=idx)
+    residual_pattern = np.array([0.0, 0.1, -0.1, 0.2, -0.2, 0.3])
+    residuals = pd.Series(np.tile(residual_pattern, 2), index=idx)
 
     X, y = build_residual_training_frame(x1, residuals)
 

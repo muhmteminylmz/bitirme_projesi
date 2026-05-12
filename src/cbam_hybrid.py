@@ -159,10 +159,11 @@ def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
             except Exception:
                 continue
             if np.isfinite(candidate.aic) and candidate.aic < best_aic:
-                best_aic = float(candidate.aic)
+                best_aic = candidate.aic
                 best_order = (p, 0, q)
 
     if best_order is None:
+        # AIC taraması yakınsamazsa, kararlı ve basit bir ARMA(1,1) varsayılanı kullanılır.
         best_order = (1, 0, 1)
 
     if np.isfinite(best_aic):
@@ -254,8 +255,11 @@ def forecast_mlp_residuals(
     required_x1_len = lag_count + 1
     if len(x1_history) < required_x1_len:
         raise ValueError(f"train_x1_history must include at least {required_x1_len} values for lag_count={lag_count}.")
-    if len(residual_history) < lag_count:
-        raise ValueError(f"train_residual_history must include at least {lag_count} values for lag_count={lag_count}.")
+    required_residual_len = lag_count
+    if len(residual_history) < required_residual_len:
+        raise ValueError(
+            f"train_residual_history must include at least {required_residual_len} values for lag_count={lag_count}."
+        )
 
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
