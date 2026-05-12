@@ -27,6 +27,8 @@ Notebook/Colab akışı 6 modül içerir:
 5. Benchmark modelleri (Baseline + XGBoost), hibrit birleşim ve RMSE/MAE karşılaştırması
 6. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı, stres testi fan chart)
 
+Veri bölme stratejisi: **%70 eğitim / %15 doğrulama / %15 test** (zaman sıralaması korunur).
+
 ## Kurulum
 
 ```bash

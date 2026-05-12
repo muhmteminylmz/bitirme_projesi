@@ -10,6 +10,7 @@ from src.cbam_hybrid import (
     clean_and_scale_data,
     enforce_stationarity,
     train_test_split_time_series,
+    train_val_test_split_time_series,
     build_residual_training_frame,
     calculate_metrics,
 )
@@ -59,6 +60,19 @@ def test_train_test_split_time_series_keeps_order():
     assert len(train) == 8
     assert len(test) == 2
     assert train.index.max() < test.index.min()
+
+
+def test_train_val_test_split_time_series_keeps_order_and_sizes():
+    idx = pd.date_range("2024-01-01", periods=20, freq="D")
+    df = pd.DataFrame({"a": np.arange(20)}, index=idx)
+
+    train, val, test = train_val_test_split_time_series(df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+
+    assert len(train) == 14
+    assert len(val) == 3
+    assert len(test) == 3
+    assert train.index.max() < val.index.min()
+    assert val.index.max() < test.index.min()
 
 
 def test_build_residual_training_frame_creates_lagged_feature():
