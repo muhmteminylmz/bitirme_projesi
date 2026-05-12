@@ -27,7 +27,10 @@ TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
-MLP_PARAMS = {"epochs": 200, "batch_size": 16, "validation_split": 0.0, "patience": 10}
+MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patience": 20, "learning_rate": 0.0005}
+RESIDUAL_LAG_COUNT = 5
+ARIMAX_P_RANGE = range(0, 4)
+ARIMAX_Q_RANGE = range(0, 4)
 MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
@@ -141,7 +144,29 @@ def train_val_test_split_time_series(
 
 def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
     print("\nARIMAX modeli eğitiliyor...")
-    model = SARIMAX(y, exog=exog, order=(1, 0, 1), enforce_stationarity=False, enforce_invertibility=False)
+    best_order: Tuple[int, int, int] | None = None
+    best_aic = np.inf
+    for p in ARIMAX_P_RANGE:
+        for q in ARIMAX_Q_RANGE:
+            try:
+                candidate = SARIMAX(
+                    y,
+                    exog=exog,
+                    order=(p, 0, q),
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                ).fit(disp=False)
+            except Exception:
+                continue
+            if np.isfinite(candidate.aic) and candidate.aic < best_aic:
+                best_aic = float(candidate.aic)
+                best_order = (p, 0, q)
+
+    if best_order is None:
+        best_order = (1, 0, 1)
+
+    print(f"Seçilen ARIMAX order: {best_order}, AIC: {best_aic:.4f}" if np.isfinite(best_aic) else f"Seçilen ARIMAX order: {best_order}")
+    model = SARIMAX(y, exog=exog, order=best_order, enforce_stationarity=False, enforce_invertibility=False)
     fitted_model = model.fit(disp=False)
     print(fitted_model.summary())
     return fitted_model
@@ -156,13 +181,13 @@ def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
 
 
 def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    # İYİLEŞTİRME: MLP'ye daha fazla geçmiş (lag) verisi vererek performansını artırıyoruz.
-    X = pd.DataFrame({
-        "x1": x1_train,
-        "x1_lag1": x1_train.shift(1),
-        "residual_lag1": residuals_train.shift(1),
-        "residual_lag2": residuals_train.shift(2)
-    })
+    # İYİLEŞTİRME: MLP'ye geçmiş 1-5 gün hata payı ve fiyat değişim lag'leri veriliyor.
+    X = pd.DataFrame({"x1": x1_train})
+    x1_change = x1_train.diff()
+    for lag in range(1, RESIDUAL_LAG_COUNT + 1):
+        X[f"residual_lag{lag}"] = residuals_train.shift(lag)
+    for lag in range(1, RESIDUAL_LAG_COUNT + 1):
+        X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -187,7 +212,7 @@ def build_and_train_mlp(
             tf.keras.layers.Dense(1, activation="linear"),
         ]
     )
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=MLP_PARAMS["learning_rate"]), loss="mse")
 
     has_validation = X_val is not None and y_val is not None and len(X_val) > 0 and len(X_val) == len(y_val)
     early_stopping = tf.keras.callbacks.EarlyStopping(
@@ -211,22 +236,38 @@ def build_and_train_mlp(
     return model
 
 
-def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, train_x1_last: float, train_res_last1: float, train_res_last2: float) -> pd.Series:
+def forecast_mlp_residuals(
+    mlp_model,
+    x1_test: pd.Series,
+    train_x1_history: pd.Series,
+    train_residual_history: pd.Series,
+    lag_count: int = RESIDUAL_LAG_COUNT,
+) -> pd.Series:
     preds = []
-    curr_res1 = train_res_last1
-    curr_res2 = train_res_last2
-    curr_x1_lag = train_x1_last
+    x1_history = list(train_x1_history.astype(float).values)
+    residual_history = list(train_residual_history.astype(float).values)
+
+    required_x1_len = lag_count + 2
+    if len(x1_history) < required_x1_len:
+        raise ValueError(f"train_x1_history must include at least {required_x1_len} values for lag_count={lag_count}.")
+    if len(residual_history) < lag_count:
+        raise ValueError(f"train_residual_history must include at least {lag_count} values for lag_count={lag_count}.")
 
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
-        X_input = np.array([[curr_x1, curr_x1_lag, curr_res1, curr_res2]], dtype=float)
+        x1_history.append(float(curr_x1))
+        x1_changes = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
+        features = [float(curr_x1)]
+
+        for lag in range(1, lag_count + 1):
+            features.append(float(residual_history[-lag]))
+        for lag in range(1, lag_count + 1):
+            features.append(float(x1_changes[-(lag + 1)]))
+
+        X_input = np.array([features], dtype=float)
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
         preds.append(pred_res)
-        
-        # Gelecek adım için lag'leri kaydırıyoruz
-        curr_res2 = curr_res1
-        curr_res1 = pred_res
-        curr_x1_lag = curr_x1
+        residual_history.append(pred_res)
 
     return pd.Series(preds, index=x1_test.index)
 
@@ -557,13 +598,12 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
         y_val=y_mlp_val.values,
     )
 
-    # İYİLEŞTİRME: MLP test verisi için geçmiş 2 günün hata payı da sağlanıyor.
+    # İYİLEŞTİRME: MLP test verisi için geçmiş 5 gün residual ve fiyat değişim hafızası sağlanıyor.
     mlp_residual_test_pred = forecast_mlp_residuals(
-        mlp_model=mlp_model, 
-        x1_test=x1_test, 
-        train_x1_last=float(x1_train.iloc[-1]),
-        train_res_last1=float(residuals_train.iloc[-1]),
-        train_res_last2=float(residuals_train.iloc[-2])
+        mlp_model=mlp_model,
+        x1_test=x1_test,
+        train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 2),
+        train_residual_history=residuals_train_val.tail(RESIDUAL_LAG_COUNT),
     )
     hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
     hybrid_pred.name = "Hibrit ARIMAX-MLP"
