@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,9 +28,19 @@ CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patience": 20, "learning_rate": 0.0005}
+SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT = 0.03
+SUCCESS_MIN_ROLLING_WIN_RATIO = 0.60
 RESIDUAL_LAG_COUNT = 5
+RESIDUAL_ROLL_WINDOW = 3
 ARIMAX_P_RANGE = range(0, 4)
+ARIMAX_D_RANGE = range(0, 2)
 ARIMAX_Q_RANGE = range(0, 4)
+ROLLING_MIN_TRAIN_SIZE_RATIO = 0.5
+ROLLING_VAL_SIZE_RATIO = 0.15
+ROLLING_TEST_SIZE_RATIO = 0.10
+ROLLING_MIN_TRAIN_ROWS = 40
+ROLLING_MIN_VAL_ROWS = 20
+ROLLING_MIN_TEST_ROWS = 20
 MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
@@ -41,6 +51,17 @@ DEFAULT_MODEL_COLOR = "#808080"
 STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 
 
+SuccessSummary = TypedDict(
+    "SuccessSummary",
+    {
+        "single_split_improvement": float,
+        "rolling_win_ratio": float,
+        "rolling_mean_improvement": float,
+        "pass": bool,
+    },
+)
+
+
 @dataclass
 class PipelineResult:
     metrics_table: pd.DataFrame
@@ -48,6 +69,17 @@ class PipelineResult:
     residuals: pd.DataFrame
     diagnostics: pd.DataFrame
     stress_table: pd.DataFrame
+    rolling_metrics: pd.DataFrame
+    success_summary: SuccessSummary
+
+
+@dataclass
+class PreprocessOutput:
+    train: pd.DataFrame
+    val: pd.DataFrame
+    test: pd.DataFrame
+    scaler: MinMaxScaler
+    stationarity: Dict[str, Dict[str, float]]
 
 
 def fetch_yfinance_data(
@@ -90,15 +122,16 @@ def clean_and_scale_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, MinMaxScaler]:
     return scaled, scaler
 
 
+def safe_adf_pvalue(series: pd.Series) -> float:
+    s = series.dropna()
+    if s.empty or s.nunique() <= 1:
+        return 1.0
+    return float(adfuller(s)[1])
+
+
 def enforce_stationarity(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
     stationary_df = df.copy()
     adf_results: Dict[str, Dict[str, float]] = {}
-
-    def safe_adf_pvalue(series: pd.Series) -> float:
-        s = series.dropna()
-        if s.empty or s.nunique() <= 1:
-            return 1.0
-        return float(adfuller(s)[1])
 
     for col in df.columns:
         initial_p = safe_adf_pvalue(df[col])
@@ -114,6 +147,64 @@ def enforce_stationarity(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Dict
             adf_results[col] = {"initial_p": initial_p, "differenced": False, "final_p": initial_p}
 
     return stationary_df.dropna(), adf_results
+
+
+def apply_stationarity_policy(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, float]]]:
+    train_out = train_df.copy()
+    val_out = val_df.copy()
+    test_out = test_df.copy()
+    stationarity: Dict[str, Dict[str, float]] = {}
+
+    for col in train_df.columns:
+        initial_p = safe_adf_pvalue(train_df[col])
+        differenced = initial_p > 0.05
+
+        if differenced:
+            train_out[col] = train_df[col].diff()
+            val_out[col] = pd.concat([train_df[col].tail(1), val_df[col]]).diff().iloc[1:]
+            test_out[col] = pd.concat([val_df[col].tail(1), test_df[col]]).diff().iloc[1:]
+            final_p = safe_adf_pvalue(train_out[col])
+        else:
+            final_p = initial_p
+
+        stationarity[col] = {"initial_p": initial_p, "differenced": differenced, "final_p": final_p}
+
+    return train_out.dropna(), val_out.dropna(), test_out.dropna(), stationarity
+
+
+def prepare_leakage_safe_splits(
+    df_raw: pd.DataFrame,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+) -> PreprocessOutput:
+    train_raw, val_raw, test_raw = train_val_test_split_time_series(df_raw, train_ratio, val_ratio, test_ratio)
+
+    train_clean = train_raw.sort_index().ffill().bfill()
+    val_clean = val_raw.sort_index().ffill().bfill()
+    test_clean = test_raw.sort_index().ffill().bfill()
+
+    scaler = MinMaxScaler()
+    train_scaled = pd.DataFrame(scaler.fit_transform(train_clean), columns=train_clean.columns, index=train_clean.index)
+    val_scaled = pd.DataFrame(scaler.transform(val_clean), columns=val_clean.columns, index=val_clean.index)
+    test_scaled = pd.DataFrame(scaler.transform(test_clean), columns=test_clean.columns, index=test_clean.index)
+
+    train_stationary, val_stationary, test_stationary, stationarity = apply_stationarity_policy(
+        train_scaled, val_scaled, test_scaled
+    )
+    columns = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
+
+    return PreprocessOutput(
+        train=train_stationary[columns],
+        val=val_stationary[columns],
+        test=test_stationary[columns],
+        scaler=scaler,
+        stationarity=stationarity,
+    )
 
 
 def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -142,56 +233,157 @@ def train_val_test_split_time_series(
     return train_df, val_df, test_df
 
 
-def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
-    print("\nARIMAX modeli eğitiliyor...")
-    best_order: Optional[Tuple[int, int, int]] = None
-    best_aic = np.inf
-    for p in ARIMAX_P_RANGE:
-        for q in ARIMAX_Q_RANGE:
-            try:
-                candidate = SARIMAX(
-                    y,
-                    exog=exog,
-                    order=(p, 0, q),
-                    enforce_stationarity=False,
-                    enforce_invertibility=False,
-                ).fit(disp=False)
-            except Exception:
-                continue
-            if np.isfinite(candidate.aic) and candidate.aic < best_aic:
-                best_aic = candidate.aic
-                best_order = (p, 0, q)
-
-    if best_order is None:
-        # AIC taraması yakınsamazsa, kararlı ve basit bir ARIMA(1,0,1) varsayılanı kullanılır.
-        best_order = (1, 0, 1)
-
-    if np.isfinite(best_aic):
-        print(f"Seçilen ARIMAX order: {best_order}, AIC: {best_aic:.4f}")
-    else:
-        print(f"Seçilen ARIMAX order: {best_order}")
-    model = SARIMAX(y, exog=exog, order=best_order, enforce_stationarity=False, enforce_invertibility=False)
-    fitted_model = model.fit(disp=False)
-    print(fitted_model.summary())
-    return fitted_model
+def create_exog_candidates(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    x1 = df[CARBON_TICKER]
+    x2 = df[IRON_TICKER]
+    candidates = {
+        "x2": pd.DataFrame({IRON_TICKER: x2}, index=df.index),
+        "x1_x2": pd.DataFrame({CARBON_TICKER: x1, IRON_TICKER: x2}, index=df.index),
+        "x1_x2_lag_roll": pd.DataFrame(
+            {
+                CARBON_TICKER: x1,
+                IRON_TICKER: x2,
+                f"{CARBON_TICKER}_lag1": x1.shift(1),
+                f"{IRON_TICKER}_lag1": x2.shift(1),
+                f"{CARBON_TICKER}_roll3": x1.rolling(3).mean(),
+                f"{IRON_TICKER}_roll3": x2.rolling(3).mean(),
+            },
+            index=df.index,
+        ),
+    }
+    return {k: v.ffill().bfill() for k, v in candidates.items()}
 
 
-def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
+def fit_sarimax_with_validation(
+    y_train: pd.Series,
+    exog_train_candidates: Dict[str, pd.DataFrame],
+    y_val: pd.Series,
+    exog_val_candidates: Dict[str, pd.DataFrame],
+) -> Tuple[SARIMAXResultsWrapper, Dict[str, float | str | int]]:
+    print("\nARIMAX modeli eğitiliyor (validation + diagnostik seçimi)...")
+    best_model: Optional[SARIMAXResultsWrapper] = None
+    best_meta: Dict[str, float | str | int] = {}
+    best_score = np.inf
+
+    for exog_name, exog_train in exog_train_candidates.items():
+        exog_val = exog_val_candidates[exog_name]
+        y_train_aligned = y_train.loc[exog_train.index]
+        y_val_aligned = y_val.loc[exog_val.index]
+
+        for p in ARIMAX_P_RANGE:
+            for d in ARIMAX_D_RANGE:
+                for q in ARIMAX_Q_RANGE:
+                    try:
+                        candidate = SARIMAX(
+                            y_train_aligned,
+                            exog=exog_train,
+                            order=(p, d, q),
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        ).fit(disp=False)
+                    except Exception:
+                        continue
+
+                    try:
+                        val_pred = pd.Series(
+                            candidate.forecast(steps=len(y_val_aligned), exog=exog_val).values,
+                            index=y_val_aligned.index,
+                        )
+                    except Exception:
+                        continue
+
+                    val_rmse = float(np.sqrt(mean_squared_error(y_val_aligned, val_pred)))
+                    resid = pd.Series(candidate.resid).dropna()
+                    if len(resid) > 10:
+                        lag = min(10, max(1, len(resid) - 1))
+                        ljung_box_pvalue = float(acorr_ljungbox(resid, lags=[lag], return_df=True)["lb_pvalue"].iloc[0])
+                    else:
+                        ljung_box_pvalue = 0.5
+                    score = val_rmse + max(0.0, 0.05 - ljung_box_pvalue)
+
+                    if score < best_score:
+                        best_score = score
+                        best_model = candidate
+                        best_meta = {
+                            "exog_name": exog_name,
+                            "p": p,
+                            "d": d,
+                            "q": q,
+                            "val_rmse": val_rmse,
+                            "ljung_box_pvalue": ljung_box_pvalue,
+                            "score": score,
+                        }
+
+    if best_model is None:
+        fallback_exog = exog_train_candidates["x2"]
+        best_model = SARIMAX(
+            y_train.loc[fallback_exog.index],
+            exog=fallback_exog,
+            order=(1, 0, 1),
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        ).fit(disp=False)
+        best_meta = {"exog_name": "x2", "p": 1, "d": 0, "q": 1, "val_rmse": 0.0, "ljung_box_pvalue": 0.0, "score": 0.0}
+
+    print(
+        f"Seçilen ARIMAX: exog={best_meta['exog_name']}, "
+        f"order=({best_meta['p']},{best_meta['d']},{best_meta['q']}), "
+        f"val_rmse={best_meta['val_rmse']}"
+    )
+    return best_model, best_meta
+
+
+def fit_tuned_xgboost(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+):
     from xgboost import XGBRegressor
 
-    model = XGBRegressor(**XGBOOST_PARAMS, random_state=42)
-    model.fit(X, y)
-    return model
+    search_space = [
+        {"n_estimators": 100, "learning_rate": 0.05, "max_depth": 3},
+        {"n_estimators": 200, "learning_rate": 0.05, "max_depth": 4},
+        {"n_estimators": 120, "learning_rate": 0.1, "max_depth": 5},
+    ]
+    best_model = None
+    best_rmse = np.inf
+    best_params = None
+    for params in search_space:
+        model = XGBRegressor(**params, random_state=42)
+        model.fit(X_train, y_train)
+        val_pred = model.predict(X_val)
+        rmse = float(np.sqrt(mean_squared_error(y_val, val_pred)))
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_model = model
+            best_params = params
+    if best_model is None:
+        raise RuntimeError(f"XGBoost model could not be trained. Search space: {search_space}")
+    print(f"Seçilen XGBoost parametreleri: {best_params}, val_rmse={best_rmse:.6f}")
+    return best_model
 
 
-def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    # İYİLEŞTİRME: MLP'ye geçmiş 1-5 gün hata payı ve fiyat değişim lag'leri veriliyor.
-    X = pd.DataFrame({"x1": x1_train})
+def build_residual_training_frame(
+    x1_train: pd.Series,
+    residuals_train: pd.Series,
+    x2_train: Optional[pd.Series] = None,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    if x2_train is None:
+        x2_train = pd.Series(0.0, index=x1_train.index)
+    X = pd.DataFrame({"x1": x1_train, "x2": x2_train})
+    X["x1_x2_interaction"] = X["x1"] * X["x2"]
     x1_change = x1_train.diff()
+    x2_change = x2_train.diff()
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"residual_lag{lag}"] = residuals_train.shift(lag)
+        X[f"x1_lag{lag}"] = x1_train.shift(lag)
+        X[f"x2_lag{lag}"] = x2_train.shift(lag)
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
+        X[f"x2_change_lag{lag}"] = x2_change.shift(lag)
+    X["residual_roll_mean_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).mean()
+    X["residual_roll_std_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).std()
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -202,32 +394,39 @@ def build_and_train_mlp(
     y_train: np.ndarray,
     X_val: np.ndarray | None = None,
     y_val: np.ndarray | None = None,
+    hidden_layers: Tuple[int, int, int] = (64, 32, 16),
+    dropout_rate: float = 0.2,
+    learning_rate: float = MLP_PARAMS["learning_rate"],
+    patience: int = MLP_PARAMS["patience"],
+    epochs: int = MLP_PARAMS["epochs"],
+    batch_size: int = MLP_PARAMS["batch_size"],
+    seed: int = 42,
 ):
-    tf.keras.utils.set_random_seed(42)
+    tf.keras.utils.set_random_seed(seed)
     model = tf.keras.Sequential(
         [
             tf.keras.layers.Input(shape=(X_train.shape[1],)),
-            tf.keras.layers.Dense(64, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(32, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(16, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(hidden_layers[0], activation="relu"),
+            tf.keras.layers.Dropout(dropout_rate),
+            tf.keras.layers.Dense(hidden_layers[1], activation="relu"),
+            tf.keras.layers.Dropout(dropout_rate),
+            tf.keras.layers.Dense(hidden_layers[2], activation="relu"),
+            tf.keras.layers.Dropout(dropout_rate),
             tf.keras.layers.Dense(1, activation="linear"),
         ]
     )
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=MLP_PARAMS["learning_rate"]), loss="mse")
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss="mse")
 
     has_validation = X_val is not None and y_val is not None and len(X_val) > 0 and len(X_val) == len(y_val)
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss" if has_validation else "loss",
-        patience=MLP_PARAMS["patience"],
+        patience=patience,
         restore_best_weights=True,
     )
 
     fit_kwargs = {
-        "epochs": MLP_PARAMS["epochs"],
-        "batch_size": MLP_PARAMS["batch_size"],
+        "epochs": epochs,
+        "batch_size": batch_size,
         "callbacks": [early_stopping],
         "verbose": 0,
     }
@@ -240,15 +439,58 @@ def build_and_train_mlp(
     return model
 
 
+def select_best_mlp_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+):
+    search_space = [
+        {"hidden_layers": (64, 32, 16), "dropout_rate": 0.2, "learning_rate": 0.0005, "patience": 20, "epochs": 250, "batch_size": 16},
+        {"hidden_layers": (128, 64, 32), "dropout_rate": 0.2, "learning_rate": 0.0003, "patience": 30, "epochs": 300, "batch_size": 16},
+    ]
+    seeds = [42, 123]
+    best_model = None
+    best_rmse = np.inf
+    evaluated: List[Tuple[dict, int, float]] = []
+    for config in search_space:
+        for seed in seeds:
+            model = build_and_train_mlp(
+                X_train=X_train,
+                y_train=y_train,
+                X_val=X_val,
+                y_val=y_val,
+                seed=seed,
+                **config,
+            )
+            pred = model.predict(X_val, verbose=0).ravel()
+            rmse = float(np.sqrt(mean_squared_error(y_val, pred)))
+            evaluated.append((config, seed, rmse))
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_model = model
+    if best_model is None:
+        raise RuntimeError(f"MLP model selection failed. Tried {len(evaluated)} config/seed combinations.")
+    return best_model
+
+
 def forecast_mlp_residuals(
     mlp_model,
     x1_test: pd.Series,
     train_x1_history: pd.Series,
     train_residual_history: pd.Series,
     lag_count: int = RESIDUAL_LAG_COUNT,
+    x2_test: Optional[pd.Series] = None,
+    train_x2_history: Optional[pd.Series] = None,
 ) -> pd.Series:
+    if x2_test is None:
+        x2_test = pd.Series(0.0, index=x1_test.index)
+    if train_x2_history is None:
+        train_x2_history = pd.Series(0.0, index=train_x1_history.index)
+
     preds = []
     x1_history = list(train_x1_history.astype(float).values)
+    x2_history = list(train_x2_history.astype(float).values)
     residual_history = list(train_residual_history.astype(float).values)
 
     required_x1_len = lag_count + 1
@@ -256,31 +498,78 @@ def forecast_mlp_residuals(
         raise ValueError(
             f"train_x1_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
         )
-    required_residual_len = lag_count
+    if len(x2_history) < required_x1_len:
+        raise ValueError(
+            f"train_x2_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
+        )
+    # En uzun geçmiş ihtiyacı lag_count ve rolling pencere koşullarının maksimumudur.
+    required_residual_len = max(lag_count, RESIDUAL_ROLL_WINDOW)
     if len(residual_history) < required_residual_len:
         raise ValueError(
             f"train_residual_history must include at least {required_residual_len} values for lag_count={lag_count}."
         )
-    x1_tail = x1_history[-required_x1_len:]
-    x1_change_history = [x1_tail[j] - x1_tail[j - 1] for j in range(1, len(x1_tail))]
 
     for i in range(len(x1_test)):
-        curr_x1 = x1_test.iloc[i]
-        features = [float(curr_x1)]
+        curr_x1 = float(x1_test.iloc[i])
+        curr_x2 = float(x2_test.iloc[i])
+        x1_change_history = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
+        x2_change_history = [x2_history[j] - x2_history[j - 1] for j in range(1, len(x2_history))]
+        roll_source = (
+            residual_history[-RESIDUAL_ROLL_WINDOW:]
+            if len(residual_history) >= RESIDUAL_ROLL_WINDOW
+            else residual_history
+        )
+        features: List[float] = [curr_x1, curr_x2, curr_x1 * curr_x2]
 
         for lag in range(1, lag_count + 1):
             features.append(float(residual_history[-lag]))
-        for lag in range(1, lag_count + 1):
+            features.append(float(x1_history[-lag]))
+            features.append(float(x2_history[-lag]))
             features.append(float(x1_change_history[-lag]))
+            features.append(float(x2_change_history[-lag]))
+        features.append(float(np.mean(roll_source)))
+        features.append(float(np.std(roll_source)))
 
         X_input = np.array([features], dtype=float)
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
         preds.append(pred_res)
         residual_history.append(pred_res)
-        x1_change_history.append(float(curr_x1) - x1_history[-1])
-        x1_history.append(float(curr_x1))
+        x1_history.append(curr_x1)
+        x2_history.append(curr_x2)
 
     return pd.Series(preds, index=x1_test.index)
+
+
+def train_hybrid_combiner(
+    y_val: pd.Series,
+    arimax_val_pred: pd.Series,
+    mlp_val_residual_pred: pd.Series,
+) -> LinearRegression:
+    X_meta = pd.DataFrame(
+        {
+            "arimax": arimax_val_pred,
+            "mlp_residual": mlp_val_residual_pred,
+        },
+        index=y_val.index,
+    )
+    model = LinearRegression()
+    model.fit(X_meta, y_val)
+    return model
+
+
+def apply_hybrid_combiner(
+    model: LinearRegression,
+    arimax_pred: pd.Series,
+    mlp_residual_pred: pd.Series,
+) -> pd.Series:
+    X_meta = pd.DataFrame(
+        {
+            "arimax": arimax_pred,
+            "mlp_residual": mlp_residual_pred,
+        },
+        index=arimax_pred.index,
+    )
+    return pd.Series(model.predict(X_meta), index=arimax_pred.index, name="Hibrit ARIMAX-MLP")
 
 
 def calculate_metrics(y_true: pd.Series, predictions_dict: Dict[str, pd.Series]) -> pd.DataFrame:
@@ -290,6 +579,214 @@ def calculate_metrics(y_true: pd.Series, predictions_dict: Dict[str, pd.Series])
         mae = float(mean_absolute_error(y_true, y_pred))
         metrics.append({"Model": model_name, "RMSE": rmse, "MAE": mae})
     return pd.DataFrame(metrics).sort_values(by="RMSE").reset_index(drop=True)
+
+
+def evaluate_success_criteria(
+    metrics_df: pd.DataFrame,
+    rolling_window_results_df: pd.DataFrame,
+    min_single_split_improvement: float = SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT,
+    min_rolling_win_ratio: float = SUCCESS_MIN_ROLLING_WIN_RATIO,
+) -> SuccessSummary:
+    sorted_metrics = metrics_df.sort_values("RMSE").reset_index(drop=True)
+    hybrid_row = sorted_metrics[sorted_metrics["Model"] == "Hibrit ARIMAX-MLP"]
+    if hybrid_row.empty:
+        return {"single_split_improvement": 0.0, "rolling_win_ratio": 0.0, "rolling_mean_improvement": 0.0, "pass": False}
+
+    hybrid_rmse = float(hybrid_row.iloc[0]["RMSE"])
+    baseline_comp = sorted_metrics[sorted_metrics["Model"] != "Hibrit ARIMAX-MLP"].iloc[0]
+    second_best_rmse = float(baseline_comp["RMSE"])
+    single_split_improvement = (second_best_rmse - hybrid_rmse) / second_best_rmse if second_best_rmse > 0 else 0.0
+
+    hybrid_wins = 0
+    total_windows = 0
+    rolling_improvements: List[float] = []
+    for _, window_df in rolling_window_results_df.groupby("window"):
+        total_windows += 1
+        sorted_window = window_df.sort_values("RMSE").reset_index(drop=True)
+        if sorted_window.iloc[0]["Model"] == "Hibrit ARIMAX-MLP":
+            hybrid_wins += 1
+        hybrid_window = sorted_window[sorted_window["Model"] == "Hibrit ARIMAX-MLP"]
+        non_hybrid = sorted_window[sorted_window["Model"] != "Hibrit ARIMAX-MLP"]
+        if not hybrid_window.empty and not non_hybrid.empty:
+            h_rmse = float(hybrid_window.iloc[0]["RMSE"])
+            n_rmse = float(non_hybrid.iloc[0]["RMSE"])
+            if n_rmse > 0:
+                rolling_improvements.append((n_rmse - h_rmse) / n_rmse)
+
+    rolling_win_ratio = (hybrid_wins / total_windows) if total_windows else 0.0
+    rolling_mean_improvement = float(np.mean(rolling_improvements)) if rolling_improvements else 0.0
+    criteria_pass = single_split_improvement >= min_single_split_improvement and rolling_win_ratio >= min_rolling_win_ratio
+    return {
+        "single_split_improvement": float(single_split_improvement),
+        "rolling_win_ratio": float(rolling_win_ratio),
+        "rolling_mean_improvement": float(rolling_mean_improvement),
+        "pass": bool(criteria_pass),
+    }
+
+
+def build_expanding_windows(
+    df: pd.DataFrame,
+    min_train_size: int,
+    val_size: int,
+    test_size: int,
+    step_size: int,
+    max_windows: int = 5,
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    windows: List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = []
+    n = len(df)
+    start = min_train_size + val_size
+    while start + test_size <= n and len(windows) < max_windows:
+        train_end = start - val_size
+        val_end = start
+        test_end = start + test_size
+        train_df = df.iloc[:train_end].copy()
+        val_df = df.iloc[train_end:val_end].copy()
+        test_df = df.iloc[val_end:test_end].copy()
+        if len(train_df) and len(val_df) and len(test_df):
+            windows.append((train_df, val_df, test_df))
+        start += step_size
+    return windows
+
+
+def run_single_window_models(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> Tuple[pd.Series, Dict[str, pd.Series], SARIMAXResultsWrapper, Dict[str, float | str | int]]:
+    y_train = train_df[TARGET_TICKER]
+    y_val = val_df[TARGET_TICKER]
+    y_test = test_df[TARGET_TICKER]
+    x1_train = train_df[CARBON_TICKER]
+    x1_val = val_df[CARBON_TICKER]
+    x1_test = test_df[CARBON_TICKER]
+    x2_train = train_df[IRON_TICKER]
+    x2_val = val_df[IRON_TICKER]
+    x2_test = test_df[IRON_TICKER]
+
+    exog_train_candidates = create_exog_candidates(train_df)
+    exog_val_candidates = create_exog_candidates(val_df)
+    exog_test_candidates = create_exog_candidates(test_df)
+    arimax_model, arimax_meta = fit_sarimax_with_validation(
+        y_train=y_train,
+        exog_train_candidates=exog_train_candidates,
+        y_val=y_val,
+        exog_val_candidates=exog_val_candidates,
+    )
+    selected_exog = str(arimax_meta["exog_name"])
+    arimax_val_pred = pd.Series(
+        arimax_model.forecast(steps=len(y_val), exog=exog_val_candidates[selected_exog]).values,
+        index=y_val.index,
+        name="ARIMAX_VAL",
+    )
+    arimax_test_pred = pd.Series(
+        arimax_model.forecast(steps=len(y_test), exog=exog_test_candidates[selected_exog]).values,
+        index=y_test.index,
+        name="ARIMAX",
+    )
+
+    residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
+    residuals_val_actual = y_val - arimax_val_pred
+    x1_train_val = pd.concat([x1_train, x1_val])
+    x2_train_val = pd.concat([x2_train, x2_val])
+    residuals_train_val = pd.concat([residuals_train, residuals_val_actual])
+    X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val, x2_train=x2_train_val)
+    split_labels = pd.concat([pd.Series("train", index=x1_train.index), pd.Series("val", index=x1_val.index)]).loc[X_mlp_all.index]
+    X_mlp_train = X_mlp_all.loc[split_labels.eq("train")]
+    y_mlp_train = y_mlp_all.loc[split_labels.eq("train")]
+    X_mlp_val = X_mlp_all.loc[split_labels.eq("val")]
+    y_mlp_val = y_mlp_all.loc[split_labels.eq("val")]
+
+    mlp_model = select_best_mlp_model(
+        X_train=X_mlp_train.values,
+        y_train=y_mlp_train.values,
+        X_val=X_mlp_val.values,
+        y_val=y_mlp_val.values,
+    )
+    mlp_residual_val_pred = forecast_mlp_residuals(
+        mlp_model=mlp_model,
+        x1_test=x1_val,
+        x2_test=x2_val,
+        train_x1_history=x1_train.tail(RESIDUAL_LAG_COUNT + 1),
+        train_x2_history=x2_train.tail(RESIDUAL_LAG_COUNT + 1),
+        train_residual_history=residuals_train.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
+    )
+    mlp_residual_test_pred = forecast_mlp_residuals(
+        mlp_model=mlp_model,
+        x1_test=x1_test,
+        x2_test=x2_test,
+        train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 1),
+        train_x2_history=x2_train_val.tail(RESIDUAL_LAG_COUNT + 1),
+        train_residual_history=residuals_train_val.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
+    )
+    combiner = train_hybrid_combiner(
+        y_val=y_val,
+        arimax_val_pred=arimax_val_pred,
+        mlp_val_residual_pred=mlp_residual_val_pred,
+    )
+    hybrid_pred = apply_hybrid_combiner(combiner, arimax_test_pred, mlp_residual_test_pred)
+
+    baseline_model = LinearRegression()
+    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER]]
+    X_val_bench = val_df[[CARBON_TICKER, IRON_TICKER]]
+    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER]]
+    baseline_model.fit(X_train_bench, y_train)
+    baseline_pred = pd.Series(baseline_model.predict(X_test_bench), index=y_test.index, name="Baseline")
+
+    xgb_model = fit_tuned_xgboost(X_train_bench, y_train, X_val_bench, y_val)
+    xgb_pred = pd.Series(xgb_model.predict(X_test_bench), index=y_test.index, name="XGBoost")
+
+    predictions = {"Baseline": baseline_pred, "ARIMAX": arimax_test_pred, "XGBoost": xgb_pred, "Hibrit ARIMAX-MLP": hybrid_pred}
+    return y_test, predictions, arimax_model, arimax_meta
+
+
+def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    min_train_size = int(len(df_raw) * ROLLING_MIN_TRAIN_SIZE_RATIO)
+    val_size = max(ROLLING_MIN_VAL_ROWS, int(len(df_raw) * ROLLING_VAL_SIZE_RATIO))
+    test_size = max(ROLLING_MIN_TEST_ROWS, int(len(df_raw) * ROLLING_TEST_SIZE_RATIO))
+    windows = build_expanding_windows(
+        df=df_raw,
+        min_train_size=min_train_size,
+        val_size=val_size,
+        test_size=test_size,
+        step_size=test_size,
+        max_windows=max_windows,
+    )
+    rolling_rows: List[pd.DataFrame] = []
+    for i, (train_raw, val_raw, test_raw) in enumerate(windows, start=1):
+        scaler = MinMaxScaler()
+        train_scaled = pd.DataFrame(scaler.fit_transform(train_raw), columns=train_raw.columns, index=train_raw.index)
+        val_scaled = pd.DataFrame(scaler.transform(val_raw), columns=val_raw.columns, index=val_raw.index)
+        test_scaled = pd.DataFrame(scaler.transform(test_raw), columns=test_raw.columns, index=test_raw.index)
+        train_df, val_df, test_df, _ = apply_stationarity_policy(train_scaled, val_scaled, test_scaled)
+        if len(train_df) < ROLLING_MIN_TRAIN_ROWS or len(val_df) < ROLLING_MIN_VAL_ROWS or len(test_df) < ROLLING_MIN_TEST_ROWS:
+            continue
+        y_test, preds, _, _ = run_single_window_models(train_df, val_df, test_df)
+        metrics = calculate_metrics(y_test, preds)
+        metrics["window"] = i
+        rolling_rows.append(metrics)
+
+    if not rolling_rows:
+        empty_summary = pd.DataFrame(columns=["Model", "RMSE_mean", "RMSE_std", "wins"])
+        empty_windows = pd.DataFrame(columns=["window", "Model", "RMSE", "MAE"])
+        return empty_summary, empty_windows
+
+    rolling_window_results = pd.concat(rolling_rows, ignore_index=True)
+    wins = []
+    for model in rolling_window_results["Model"].unique():
+        win_count = 0
+        for _, window_df in rolling_window_results.groupby("window"):
+            if window_df.sort_values("RMSE").iloc[0]["Model"] == model:
+                win_count += 1
+        wins.append({"Model": model, "wins": win_count})
+    wins_df = pd.DataFrame(wins)
+    summary = (
+        rolling_window_results.groupby("Model", as_index=False)
+        .agg(RMSE_mean=("RMSE", "mean"), RMSE_std=("RMSE", "std"))
+        .merge(wins_df, on="Model", how="left")
+        .sort_values("RMSE_mean")
+        .reset_index(drop=True)
+    )
+    return summary, rolling_window_results
 
 
 def plot_module_visualizations(
@@ -464,6 +961,8 @@ def write_thesis_report(
     arimax_coef_table_str: str,
     diagnostics_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
+    rolling_summary_df: pd.DataFrame,
+    success_summary: SuccessSummary,
     stress_table_df: pd.DataFrame,
     report_path: Path,
 ):
@@ -485,8 +984,8 @@ def write_thesis_report(
         "1b) Korelasyon Matrisi (Ham Kapanış Fiyatları):",
         corr_matrix.to_string(float_format=lambda x: f"{x:.6f}"),
         "",
-        "2) ADF TEST SONUÇLARI",
-        "-" * 80,
+             "2) ADF TEST SONUÇLARI (YALNIZCA EĞİTİM BÖLÜMÜ REFERANSLI)",
+             "-" * 80,
     ]
     for col, result in adf_results.items():
         lines.append(
@@ -500,7 +999,7 @@ def write_thesis_report(
             "-" * 80,
             arimax_summary,
             "",
-            "TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR, MA ve X2 / Demir Cevheri)",
+            "TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR/MA/d ve exog aday seçimi)",
             "-" * 80,
             arimax_coef_table_str,
             "",
@@ -512,7 +1011,18 @@ def write_thesis_report(
             "-" * 80,
             metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "6) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
+            "6) ROLLING BACKTEST ÖZETİ (RMSE ortalama / std / kazanılan pencere)",
+            "-" * 80,
+            rolling_summary_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+            "",
+            "7) BAŞARI KRİTERİ KONTROLÜ (AÇIK ARA BİRİNCİLİK)",
+            "-" * 80,
+            f"Tek split iyileşme oranı: {float(success_summary['single_split_improvement']):.4%}",
+            f"Rolling pencere kazanma oranı: {float(success_summary['rolling_win_ratio']):.4%}",
+            f"Rolling ortalama iyileşme: {float(success_summary['rolling_mean_improvement']):.4%}",
+            f"Sonuç: {'PASS' if bool(success_summary['pass']) else 'FAIL'}",
+            "",
+            "8) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
             "-" * 80,
             stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
             "",
@@ -540,8 +1050,10 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     plot_correlation_heatmap(corr_matrix)
 
-    df_scaled, _ = clean_and_scale_data(df_raw)
-    df_stationary, adf_results = enforce_stationarity(df_scaled)
+    preprocessed = prepare_leakage_safe_splits(df_raw)
+    train_df, val_df, test_df = preprocessed.train, preprocessed.val, preprocessed.test
+    df_stationary = pd.concat([train_df, val_df, test_df])
+    adf_results = preprocessed.stationarity
 
     print("\n--- Betimsel İstatistikler (Birinci Farkı Alınmış Seriler) ---")
     diff_stats = df_stationary.describe().T[["mean", "std", "min", "max"]]
@@ -549,77 +1061,9 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     diff_stats.columns = ["Ortalama (Mean)", "Standart Sapma (Std)", "Min", "Max", "Çarpıklık (Skewness)"]
     print(diff_stats.to_string(float_format=lambda x: f"{x:.6f}"))
 
-    train_df, val_df, test_df = train_val_test_split_time_series(df_stationary)
-
-    y_train = train_df[TARGET_TICKER]
-    y_val = val_df[TARGET_TICKER]
-    x1_train = train_df[CARBON_TICKER]
-    x1_val = val_df[CARBON_TICKER]
-    x2_train = train_df[IRON_TICKER]
-    x2_val = val_df[IRON_TICKER]
-    y_test = test_df[TARGET_TICKER]
-    x1_test = test_df[CARBON_TICKER]
-    x2_test = test_df[IRON_TICKER]
-
-    print("\n=== Modül 2: ARIMAX Eğitimi ve Benchmark'lar ===")
-    arimax_model = fit_sarimax(y_train, exog=x2_train)
+    print("\n=== Modül 2-3: ARIMAX + MLP + Hibrit + Benchmark ===")
+    y_test, predictions, arimax_model, arimax_meta = run_single_window_models(train_df, val_df, test_df)
     arimax_coef_table_str = str(arimax_model.summary().tables[1])
-    arimax_test_pred = pd.Series(
-        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_test) - 1, exog=x2_test).values,
-        index=y_test.index,
-        name="ARIMAX",
-    )
-
-    residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
-    arimax_val_pred = pd.Series(
-        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_val) - 1, exog=x2_val).values,
-        index=y_val.index,
-        name="ARIMAX_VAL",
-    )
-    residuals_val = y_val - arimax_val_pred
-
-    baseline_model = LinearRegression()
-    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER]]
-    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER]]
-    baseline_model.fit(X_train_bench, y_train)
-    baseline_pred = pd.Series(baseline_model.predict(X_test_bench), index=y_test.index, name="Baseline")
-
-    xgb_model = fit_xgboost_regressor(X_train_bench, y_train)
-    xgb_pred = pd.Series(xgb_model.predict(X_test_bench), index=y_test.index, name="XGBoost")
-
-    print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
-    x1_train_val = pd.concat([x1_train, x1_val])
-    residuals_train_val = pd.concat([residuals_train, residuals_val])
-    X_mlp_all, y_mlp_all = build_residual_training_frame(x1_train_val, residuals_train_val)
-
-    split_labels = pd.concat(
-        [pd.Series("train", index=x1_train.index), pd.Series("val", index=x1_val.index)]
-    ).loc[X_mlp_all.index]
-    train_index_mask = split_labels.eq("train")
-    val_index_mask = split_labels.eq("val")
-    X_mlp_train = X_mlp_all.loc[train_index_mask]
-    y_mlp_train = y_mlp_all.loc[train_index_mask]
-    X_mlp_val = X_mlp_all.loc[val_index_mask]
-    y_mlp_val = y_mlp_all.loc[val_index_mask]
-
-    mlp_model = build_and_train_mlp(
-        X_mlp_train.values,
-        y_mlp_train.values,
-        X_val=X_mlp_val.values,
-        y_val=y_mlp_val.values,
-    )
-
-    # İYİLEŞTİRME: MLP test verisi için geçmiş 5 gün residual ve fiyat değişim hafızası sağlanıyor.
-    mlp_residual_test_pred = forecast_mlp_residuals(
-        mlp_model=mlp_model,
-        x1_test=x1_test,
-        train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 1),
-        train_residual_history=residuals_train_val.tail(RESIDUAL_LAG_COUNT),
-    )
-    hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
-    hybrid_pred.name = "Hibrit ARIMAX-MLP"
-
-    predictions = {"Baseline": baseline_pred, "ARIMAX": arimax_test_pred, "XGBoost": xgb_pred, "Hibrit ARIMAX-MLP": hybrid_pred}
     predictions_df = pd.DataFrame(predictions).reindex(y_test.index)
     residuals_df = pd.DataFrame(
         {"XGBoost": y_test - predictions_df["XGBoost"], "Hibrit ARIMAX-MLP": y_test - predictions_df["Hibrit ARIMAX-MLP"]},
@@ -640,6 +1084,15 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("\nResidual Tanı Testleri (Hibrit Model):")
     print(diagnostics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
+    rolling_summary_df, rolling_window_results_df = run_rolling_backtest(df_raw=df_raw, max_windows=4)
+    success_summary = evaluate_success_criteria(metrics_df, rolling_window_results_df)
+    print("\n=== Başarı Kriteri Kontrolü ===")
+    print(
+        f"Tek split iyileşme: {success_summary['single_split_improvement']:.2%} | "
+        f"Rolling kazanma oranı: {success_summary['rolling_win_ratio']:.2%} | "
+        f"PASS: {success_summary['pass']}"
+    )
+
     plot_module_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df, residuals_df=residuals_df)
 
     print("\n=== Modül 5: Karbon Stres Testi ===")
@@ -654,10 +1107,12 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
         corr_matrix=corr_matrix,
         diff_stats=diff_stats,
         adf_results=adf_results,
-        arimax_summary=str(arimax_model.summary()),
+        arimax_summary=str(arimax_model.summary()) + f"\n\nSelected exog: {arimax_meta['exog_name']}",
         arimax_coef_table_str=arimax_coef_table_str,
         diagnostics_df=diagnostics_df,
         metrics_df=metrics_df,
+        rolling_summary_df=rolling_summary_df,
+        success_summary=success_summary,
         stress_table_df=stress_table_df,
         report_path=Path.cwd() / "Tez_Bulgulari_Raporu.txt",
     )
@@ -668,6 +1123,8 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
         residuals=residuals_df,
         diagnostics=diagnostics_df,
         stress_table=stress_table_df,
+        rolling_metrics=rolling_summary_df,
+        success_summary=success_summary,
     )
 
 
