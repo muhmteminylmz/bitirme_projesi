@@ -163,7 +163,7 @@ def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
                 best_order = (p, 0, q)
 
     if best_order is None:
-        # AIC taraması yakınsamazsa, kararlı ve basit bir ARMA(1,1) varsayılanı kullanılır.
+        # AIC taraması yakınsamazsa, kararlı ve basit bir ARIMA(1,0,1) varsayılanı kullanılır.
         best_order = (1, 0, 1)
 
     if np.isfinite(best_aic):
@@ -249,17 +249,20 @@ def forecast_mlp_residuals(
 ) -> pd.Series:
     preds = []
     x1_history = list(train_x1_history.astype(float).values)
-    x1_change_history = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
     residual_history = list(train_residual_history.astype(float).values)
 
     required_x1_len = lag_count + 1
     if len(x1_history) < required_x1_len:
-        raise ValueError(f"train_x1_history must include at least {required_x1_len} values for lag_count={lag_count}.")
+        raise ValueError(
+            f"train_x1_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
+        )
     required_residual_len = lag_count
     if len(residual_history) < required_residual_len:
         raise ValueError(
             f"train_residual_history must include at least {required_residual_len} values for lag_count={lag_count}."
         )
+    x1_tail = x1_history[-required_x1_len:]
+    x1_change_history = [x1_tail[j] - x1_tail[j - 1] for j in range(1, len(x1_tail))]
 
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
