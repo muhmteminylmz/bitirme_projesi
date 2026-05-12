@@ -12,8 +12,8 @@ Son 5 yıllık günlük veride şu yapıyı kurar:
 
 Model:
 
-1. **ARIMAX** (Y ~ X2)
-2. **MLP** ile ARIMAX residual tahmini (X1 + residual lag1)
+1. **ARIMAX** (Y ~ X2, order otomatik AIC seçimi)
+2. **MLP** ile ARIMAX residual tahmini (X1 + residual lag1-lag5 + X1 değişim lag1-lag5)
 3. **Hibrit tahmin** = ARIMAX tahmini + MLP residual tahmini
 
 ## Notebook Yapısı

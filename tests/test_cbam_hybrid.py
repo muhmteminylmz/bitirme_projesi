@@ -76,14 +76,28 @@ def test_train_val_test_split_time_series_keeps_order_and_sizes():
 
 
 def test_build_residual_training_frame_creates_lagged_feature():
-    idx = pd.date_range("2024-01-01", periods=6, freq="D")
-    x1 = pd.Series([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], index=idx)
-    residuals = pd.Series([0.0, 0.1, -0.1, 0.2, -0.2, 0.3], index=idx)
+    idx = pd.date_range("2024-01-01", periods=12, freq="D")
+    x1 = pd.Series(np.linspace(0.1, 1.2, 12), index=idx)
+    residual_pattern = np.array([0.0, 0.1, -0.1, 0.2, -0.2, 0.3])
+    residuals = pd.Series(np.tile(residual_pattern, 2), index=idx)
 
     X, y = build_residual_training_frame(x1, residuals)
 
-    assert list(X.columns) == ["x1", "residual_lag1"]
-    assert len(X) == len(y) == 5
+    expected_columns = [
+        "x1",
+        "residual_lag1",
+        "residual_lag2",
+        "residual_lag3",
+        "residual_lag4",
+        "residual_lag5",
+        "x1_change_lag1",
+        "x1_change_lag2",
+        "x1_change_lag3",
+        "x1_change_lag4",
+        "x1_change_lag5",
+    ]
+    assert list(X.columns) == expected_columns
+    assert len(X) == len(y) == 6
     assert not X.isna().any().any()
 
 
