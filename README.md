@@ -13,21 +13,29 @@ Son 5 yıllık günlük veride şu yapıyı kurar:
 Model:
 
 1. **ARIMAX** (Y ~ X2, order otomatik AIC seçimi)
-2. **MLP** ile ARIMAX residual tahmini (X1 + residual lag1-lag5 + X1 değişim lag1-lag5)
-3. **Hibrit tahmin** = ARIMAX tahmini + MLP residual tahmini
+2. **MLP** ile ARIMAX residual tahmini (X1/X2, residual lagleri, fiyat lagleri, değişim lagleri, rolling residual istatistikleri)
+3. **Hibrit tahmin** = validation üzerinde öğrenilen lineer meta-birleştirici (ARIMAX + MLP residual)
 
 ## Notebook Yapısı
 
 Notebook/Colab akışı 6 modül içerir:
 
-1. Veri çekme, ffill/bfill, MinMax, ADF/diff
-2. ARIMAX eğitimi ve test tahmini
-3. Eğitim residual çıkarımı
-4. TensorFlow/Keras MLP eğitimi
-5. Benchmark modelleri (Baseline + XGBoost), hibrit birleşim ve RMSE/MAE karşılaştırması
-6. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı, stres testi fan chart)
+1. Veri çekme, ffill/bfill, **leakage-safe ölçekleme** (yalnızca train fit), ADF/diff (train referanslı)
+2. ARIMAX eğitimi ve model seçimi (p,d,q + exog adayları; validation RMSE + residual whiteness)
+3. Eğitim/validation residual çıkarımı
+4. TensorFlow/Keras MLP residual modeli (genişletilmiş özellik seti + kontrollü HP/seed araması)
+5. Benchmark modelleri (Baseline + XGBoost tuning), öğrenilebilir hibrit birleşim ve RMSE/MAE karşılaştırması
+6. **Rolling backtest** özeti (RMSE mean/std/wins) + başarı kriteri pass/fail çıktısı
+7. Akademik görselleştirme (RMSE bar chart, test tahmin çizgileri, residual dağılımı, stres testi fan chart)
 
-Veri bölme stratejisi: **%70 eğitim / %15 doğrulama / %15 test** (zaman sıralaması korunur).
+Veri bölme stratejisi: **%70 eğitim / %15 doğrulama / %15 test** (zaman sıralaması korunur) + expanding-window rolling backtest.
+
+## Başarı Kriteri
+
+Pipeline aşağıdaki hedefleri otomatik pass/fail olarak raporlar:
+
+- Tek split test RMSE’de hibrit modelin ikinci en iyi modele karşı minimum iyileşme eşiği
+- Rolling backtest pencerelerinde hibrit modelin kazanma oranı eşiği
 
 ## Kurulum
 
