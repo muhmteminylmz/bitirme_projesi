@@ -165,7 +165,10 @@ def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
     if best_order is None:
         best_order = (1, 0, 1)
 
-    print(f"Seçilen ARIMAX order: {best_order}, AIC: {best_aic:.4f}" if np.isfinite(best_aic) else f"Seçilen ARIMAX order: {best_order}")
+    if np.isfinite(best_aic):
+        print(f"Seçilen ARIMAX order: {best_order}, AIC: {best_aic:.4f}")
+    else:
+        print(f"Seçilen ARIMAX order: {best_order}")
     model = SARIMAX(y, exog=exog, order=best_order, enforce_stationarity=False, enforce_invertibility=False)
     fitted_model = model.fit(disp=False)
     print(fitted_model.summary())
@@ -187,7 +190,7 @@ def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Serie
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"residual_lag{lag}"] = residuals_train.shift(lag)
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
-        X[f"x1_change_lag{lag}"] = x1_change.shift(lag - 1)
+        X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -247,7 +250,7 @@ def forecast_mlp_residuals(
     x1_history = list(train_x1_history.astype(float).values)
     residual_history = list(train_residual_history.astype(float).values)
 
-    required_x1_len = lag_count
+    required_x1_len = lag_count + 1
     if len(x1_history) < required_x1_len:
         raise ValueError(f"train_x1_history must include at least {required_x1_len} values for lag_count={lag_count}.")
     if len(residual_history) < lag_count:
@@ -256,14 +259,14 @@ def forecast_mlp_residuals(
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
         x1_history.append(float(curr_x1))
-        recent_x1 = x1_history[-(lag_count + 1):]
+        recent_x1 = x1_history[-(lag_count + 2):]
         x1_changes = [recent_x1[j] - recent_x1[j - 1] for j in range(1, len(recent_x1))]
         features = [float(curr_x1)]
 
         for lag in range(1, lag_count + 1):
             features.append(float(residual_history[-lag]))
         for lag in range(1, lag_count + 1):
-            features.append(float(x1_changes[-lag]))
+            features.append(float(x1_changes[-(lag + 1)]))
 
         X_input = np.array([features], dtype=float)
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
@@ -603,7 +606,7 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     mlp_residual_test_pred = forecast_mlp_residuals(
         mlp_model=mlp_model,
         x1_test=x1_test,
-        train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT),
+        train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 1),
         train_residual_history=residuals_train_val.tail(RESIDUAL_LAG_COUNT),
     )
     hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)

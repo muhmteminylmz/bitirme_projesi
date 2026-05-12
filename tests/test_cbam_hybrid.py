@@ -96,7 +96,7 @@ def test_build_residual_training_frame_creates_lagged_feature():
         "x1_change_lag5",
     ]
     assert list(X.columns) == expected_columns
-    assert len(X) == len(y) == 7
+    assert len(X) == len(y) == 6
     assert not X.isna().any().any()
 
 
