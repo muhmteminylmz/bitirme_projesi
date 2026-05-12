@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 import sys
 from pathlib import Path
 
@@ -7,20 +8,26 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.cbam_hybrid import (
+    STABLE_RMSE_BAND_UPPER,
     FX_TICKER,
     apply_hybrid_combiner,
     apply_stationarity_policy,
+    build_module_breakdown,
     build_expanding_windows,
     clean_and_scale_data,
     compute_log_returns,
     evaluate_success_criteria,
     enforce_stationarity,
+    find_first_breakpoint,
     train_test_split_time_series,
     train_hybrid_combiner,
     train_val_test_split_time_series,
     build_residual_training_frame,
     calculate_metrics,
     prepare_leakage_safe_splits,
+    run_ablation_experiments,
+    validate_data_quality,
+    validate_split_integrity,
 )
 
 
@@ -140,6 +147,14 @@ def test_build_residual_training_frame_creates_lagged_feature():
     assert X.loc[first_idx, "x1_x2_interaction"] == X.loc[first_idx, "x1"] * X.loc[first_idx, "x2"]
 
 
+def test_build_residual_training_frame_rejects_invalid_feature_mode():
+    idx = pd.date_range("2024-01-01", periods=12, freq="D")
+    x1 = pd.Series(np.linspace(0.1, 1.2, 12), index=idx)
+    residuals = pd.Series(np.linspace(-0.1, 0.1, 12), index=idx)
+    with pytest.raises(ValueError):
+        build_residual_training_frame(x1, residuals, feature_mode="invalid")
+
+
 def test_calculate_metrics_returns_rmse_mae_for_all_models():
     idx = pd.date_range("2024-01-01", periods=4, freq="D")
     y_true = pd.Series([0.2, 0.3, 0.4, 0.5], index=idx)
@@ -235,3 +250,82 @@ def test_hybrid_combiner_and_success_criteria():
     success = evaluate_success_criteria(metrics_df, rolling_df)
     assert success["single_split_improvement"] > 0
     assert success["rolling_win_ratio"] == 1.0
+
+
+def test_validate_data_quality_passes_for_clean_price_panel():
+    idx = pd.date_range("2024-01-01", periods=30, freq="B")
+    df = pd.DataFrame(
+        {
+            "EREGL.IS": np.linspace(10, 12, 30),
+            "KEUA": np.linspace(20, 22, 30),
+            "TIO=F": np.linspace(30, 31, 30),
+            "USDTRY=X": np.linspace(25, 26, 30),
+        },
+        index=idx,
+    )
+    report = validate_data_quality(df)
+    assert bool(report["quality_pass"]) is True
+
+
+def test_validate_split_integrity_raises_on_overlap():
+    idx = pd.date_range("2024-01-01", periods=10, freq="D")
+    train = pd.DataFrame({"x": np.arange(6)}, index=idx[:6])
+    val = pd.DataFrame({"x": np.arange(2)}, index=idx[5:7])
+    test = pd.DataFrame({"x": np.arange(3)}, index=idx[7:10])
+    with pytest.raises(ValueError):
+        validate_split_integrity(train, val, test)
+
+
+def test_success_criteria_fails_when_rolling_is_bad_even_if_single_split_good():
+    metrics_df = pd.DataFrame(
+        [
+            {"Model": "Hibrit ARIMAX-MLP", "RMSE": 0.20, "MAE": 0.10},
+            {"Model": "Baseline", "RMSE": 0.30, "MAE": 0.20},
+        ]
+    )
+    rolling_df = pd.DataFrame(
+        [
+            {"window": 1, "Model": "Hibrit ARIMAX-MLP", "RMSE": 0.60, "MAE": 0.40},
+            {"window": 1, "Model": "Baseline", "RMSE": 0.40, "MAE": 0.30},
+            {"window": 2, "Model": "Hibrit ARIMAX-MLP", "RMSE": 0.65, "MAE": 0.45},
+            {"window": 2, "Model": "Baseline", "RMSE": 0.45, "MAE": 0.32},
+        ]
+    )
+    out = evaluate_success_criteria(metrics_df, rolling_df, stable_rmse_upper=STABLE_RMSE_BAND_UPPER)
+    assert out["single_split_improvement"] > 0
+    assert out["rolling_win_ratio"] == 0.0
+    assert out["pass"] is False
+
+
+def test_ablation_experiments_output():
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    y_true = pd.Series([1, 2, 3, 4, 5], index=idx, dtype=float)
+    predictions = {
+        "Baseline": pd.Series([1.1, 1.9, 2.8, 4.2, 5.1], index=idx),
+        "ARIMAX": pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=idx),
+        "XGBoost": pd.Series([1.2, 2.1, 2.9, 3.8, 4.9], index=idx),
+        "Hibrit ARIMAX-MLP": pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=idx),
+    }
+    rolling_summary = pd.DataFrame([{"Model": "Hibrit ARIMAX-MLP", "RMSE_mean": 0.5, "RMSE_std": 0.1, "wins": 2}])
+    ablation = run_ablation_experiments(y_true, predictions)
+    assert not ablation.empty
+    assert "Variant" in ablation.columns
+    assert float(ablation.iloc[0]["RMSE"]) <= float(ablation.iloc[-1]["RMSE"])
+
+
+def test_breakpoint_detection_output():
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    y_true = pd.Series([1, 2, 3, 4, 5], index=idx, dtype=float)
+    predictions = {
+        "Baseline": pd.Series([1.4, 2.3, 3.2, 3.7, 4.5], index=idx),
+        "ARIMAX": pd.Series([1.2, 2.1, 2.9, 4.1, 5.1], index=idx),
+        "XGBoost": pd.Series([1.3, 2.2, 3.0, 3.9, 4.8], index=idx),
+        "Hibrit ARIMAX-MLP": pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=idx),
+    }
+    rolling_summary = pd.DataFrame([{"Model": "Hibrit ARIMAX-MLP", "RMSE_mean": 0.5, "RMSE_std": 0.1, "wins": 2}])
+    breakdown = build_module_breakdown(y_true, predictions, rolling_summary)
+    assert "module" in breakdown.columns and "rmse" in breakdown.columns
+    report = find_first_breakpoint(breakdown, threshold=0.2)
+    assert "İlk kırılma noktası" in report
+    first_break_module = breakdown[breakdown["rmse"] > 0.2].iloc[0]["module"]
+    assert first_break_module in report

@@ -37,6 +37,15 @@ Pipeline aşağıdaki hedefleri otomatik pass/fail olarak raporlar:
 
 - Tek split test RMSE’de hibrit modelin ikinci en iyi modele karşı minimum iyileşme eşiği
 - Rolling backtest pencerelerinde hibrit modelin kazanma oranı eşiği
+- Tek split ve rolling hibrit RMSE için stabil bant üst sınırı kontrolü
+- Tek split iyi, rolling kötü ise otomatik **FAIL** (katı karar kuralı)
+
+Ek olarak pipeline artık:
+
+- Data quality gate (eksik veri, indeks bütünlüğü, anomali sıçrama oranı) uygular
+- Seed tekrarlı diagnostik baseline üretir (RMSE/MAE dağılımı)
+- Modül bazlı RMSE ayrıştırması ve ilk kırılma noktası raporu üretir
+- Ablation karşılaştırma tablosu üretir
 
 ## Kurulum
 
@@ -48,6 +57,12 @@ pip install -r requirements.txt
 
 ```bash
 python main.py
+```
+
+Testler:
+
+```bash
+pytest -q
 ```
 
 Notebook sürümü:
