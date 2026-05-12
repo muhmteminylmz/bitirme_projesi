@@ -321,6 +321,32 @@ def run_stress_test(base_price: float) -> pd.DataFrame:
         )
     return pd.DataFrame(rows)
 
+def plot_raw_data_summary(df_raw: pd.DataFrame):
+    # 3 satır, 1 sütunluk ortak X eksenli bir figür oluşturuyoruz
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    
+    # 1. Panel: Hedef Değişken (EREGL.IS)
+    axes[0].plot(df_raw.index, df_raw[TARGET_TICKER], color="#1f77b4", linewidth=1.5)
+    axes[0].set_title(f"{TARGET_TICKER} - Kapanış Fiyatı (TL)", fontweight="bold", fontsize=11)
+    axes[0].set_ylabel("Fiyat")
+    
+    # 2. Panel: Karbon Fonu (KEUA)
+    axes[1].plot(df_raw.index, df_raw[CARBON_TICKER], color="#2ca02c", linewidth=1.5)
+    axes[1].set_title(f"{CARBON_TICKER} - Karbon Fonu Fiyatı", fontweight="bold", fontsize=11)
+    axes[1].set_ylabel("Fiyat")
+    
+    # 3. Panel: Demir Cevheri (TIO=F)
+    axes[2].plot(df_raw.index, df_raw[IRON_TICKER], color="#d62728", linewidth=1.5)
+    axes[2].set_title(f"{IRON_TICKER} - Demir Cevheri Vadeli İşlem Fiyatı", fontweight="bold", fontsize=11)
+    axes[2].set_ylabel("Fiyat")
+    axes[2].set_xlabel("Tarih")
+    
+    # Ana Başlık ve Kaydetme İşlemleri
+    fig.suptitle("Şekil 3.1: Ham Veri Zaman Serisi Özeti", fontsize=14, fontweight="bold", y=0.98)
+    plt.tight_layout()
+    plt.savefig("Grafik_0a_Ham_Veri_Ozeti.png", dpi=300)
+    plt.close()
+    print("Ham veri özet grafiği kaydedildi: Grafik_0a_Ham_Veri_Ozeti.png")
 
 def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -417,6 +443,9 @@ def write_thesis_report(
 def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(interval=interval)
+
+    print("\n--- Ham Veri Zaman Serisi Özeti ---")
+    plot_raw_data_summary(df_raw)
 
     print("\n--- Temel İstatistikler (Ham Veri) ---")
     basic_stats = df_raw.describe()

@@ -43,8 +43,8 @@ TIO=F: initial_p=0.169791, differenced=True, final_p=0.000000
 ==============================================================================
 Dep. Variable:               EREGL.IS   No. Observations:                 1056
 Model:               SARIMAX(1, 0, 1)   Log Likelihood                2724.677
-Date:                Sat, 25 Apr 2026   AIC                          -5441.355
-Time:                        22:06:43   BIC                          -5421.513
+Date:                Tue, 12 May 2026   AIC                          -5441.355
+Time:                        16:59:46   BIC                          -5421.513
 Sample:                    04-02-2021   HQIC                         -5433.833
                          - 04-18-2025                                         
 Covariance Type:                  opg                                         
