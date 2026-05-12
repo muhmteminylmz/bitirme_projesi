@@ -124,14 +124,14 @@ def train_val_test_split_time_series(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_ratio = train_ratio + val_ratio + test_ratio
     if not np.isclose(total_ratio, 1.0):
-        raise ValueError("train_ratio + val_ratio + test_ratio toplamı 1.0 olmalıdır.")
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0.")
 
     n = len(df)
     train_size = int(n * train_ratio)
     val_size = int(n * val_ratio)
 
     if train_size <= 0 or val_size <= 0 or n - train_size - val_size <= 0:
-        raise ValueError("Veri seti 70/15/15 bölmesi için yetersiz.")
+        raise ValueError("Dataset is insufficient for 70/15/15 split.")
 
     train_df = df.iloc[:train_size].copy()
     val_df = df.iloc[train_size:train_size + val_size].copy()
