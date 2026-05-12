@@ -137,7 +137,7 @@ def clean_and_scale_data(df: pd.DataFrame, fit_df: Optional[pd.DataFrame] = None
 def compute_log_returns(df: pd.DataFrame) -> pd.DataFrame:
     if (df <= 0).any().any():
         bad_cols = df.columns[(df <= 0).any()].tolist()
-        raise ValueError(f"Log-getiri için tüm sütunlar pozitif olmalı. Sorunlu sütunlar: {bad_cols}")
+        raise ValueError(f"Logaritmik getiri için tüm sütunlar pozitif olmalı. Sorunlu sütunlar: {bad_cols}")
     return np.log(df / df.shift(1)).dropna()
 
 
@@ -257,7 +257,10 @@ def create_exog_candidates(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     x2 = df[IRON_TICKER]
     x3 = df[FX_TICKER]
     candidates = {
+        "x1": pd.DataFrame({CARBON_TICKER: x1}, index=df.index),
         "x2": pd.DataFrame({IRON_TICKER: x2}, index=df.index),
+        "x1_x2": pd.DataFrame({CARBON_TICKER: x1, IRON_TICKER: x2}, index=df.index),
+        "x1_x3": pd.DataFrame({CARBON_TICKER: x1, FX_TICKER: x3}, index=df.index),
         "x2_x3": pd.DataFrame({IRON_TICKER: x2, FX_TICKER: x3}, index=df.index),
         "x1_x2_x3": pd.DataFrame({CARBON_TICKER: x1, IRON_TICKER: x2, FX_TICKER: x3}, index=df.index),
         "x1_x2_x3_lag_roll": pd.DataFrame(
@@ -965,7 +968,7 @@ def plot_raw_data_summary(df_raw: pd.DataFrame):
     
     # 1. Panel: Hedef Değişken (EREGL.IS)
     axes[0].plot(df_raw.index, df_raw[TARGET_TICKER], color="#1f77b4", linewidth=1.5)
-    axes[0].set_title(f"{TARGET_TICKER} - Kapanış Fiyatı (USD standardize)", fontweight="bold", fontsize=11)
+    axes[0].set_title(f"{TARGET_TICKER} - Kapanış Fiyatı (USD olarak standardize)", fontweight="bold", fontsize=11)
     axes[0].set_ylabel("Fiyat")
     
     # 2. Panel: Karbon Fonu (KEUA)
