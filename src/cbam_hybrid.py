@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,9 +31,16 @@ MLP_PARAMS = {"epochs": 300, "batch_size": 16, "validation_split": 0.0, "patienc
 SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT = 0.03
 SUCCESS_MIN_ROLLING_WIN_RATIO = 0.60
 RESIDUAL_LAG_COUNT = 5
+RESIDUAL_ROLL_WINDOW = 3
 ARIMAX_P_RANGE = range(0, 4)
 ARIMAX_D_RANGE = range(0, 2)
 ARIMAX_Q_RANGE = range(0, 4)
+ROLLING_MIN_TRAIN_SIZE_RATIO = 0.5
+ROLLING_VAL_SIZE_RATIO = 0.15
+ROLLING_TEST_SIZE_RATIO = 0.10
+ROLLING_MIN_TRAIN_ROWS = 40
+ROLLING_MIN_VAL_ROWS = 20
+ROLLING_MIN_TEST_ROWS = 20
 MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
@@ -44,6 +51,17 @@ DEFAULT_MODEL_COLOR = "#808080"
 STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 
 
+SuccessSummary = TypedDict(
+    "SuccessSummary",
+    {
+        "single_split_improvement": float,
+        "rolling_win_ratio": float,
+        "rolling_mean_improvement": float,
+        "pass": bool,
+    },
+)
+
+
 @dataclass
 class PipelineResult:
     metrics_table: pd.DataFrame
@@ -52,7 +70,7 @@ class PipelineResult:
     diagnostics: pd.DataFrame
     stress_table: pd.DataFrame
     rolling_metrics: pd.DataFrame
-    success_summary: Dict[str, float | bool]
+    success_summary: SuccessSummary
 
 
 @dataclass
@@ -305,7 +323,7 @@ def fit_sarimax_with_validation(
             enforce_stationarity=False,
             enforce_invertibility=False,
         ).fit(disp=False)
-        best_meta = {"exog_name": "x2", "p": 1, "d": 0, "q": 1, "val_rmse": np.nan, "ljung_box_pvalue": np.nan, "score": np.nan}
+        best_meta = {"exog_name": "x2", "p": 1, "d": 0, "q": 1, "val_rmse": 0.0, "ljung_box_pvalue": 0.0, "score": 0.0}
 
     print(
         f"Seçilen ARIMAX: exog={best_meta['exog_name']}, "
@@ -361,8 +379,8 @@ def build_residual_training_frame(
     for lag in range(1, RESIDUAL_LAG_COUNT + 1):
         X[f"x1_change_lag{lag}"] = x1_change.shift(lag)
         X[f"x2_change_lag{lag}"] = x2_change.shift(lag)
-    X["residual_roll_mean_3"] = residuals_train.shift(1).rolling(3).mean()
-    X["residual_roll_std_3"] = residuals_train.shift(1).rolling(3).std()
+    X["residual_roll_mean_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).mean()
+    X["residual_roll_std_3"] = residuals_train.shift(1).rolling(RESIDUAL_ROLL_WINDOW).std()
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -479,7 +497,7 @@ def forecast_mlp_residuals(
         raise ValueError(
             f"train_x2_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
         )
-    required_residual_len = lag_count
+    required_residual_len = max(lag_count, RESIDUAL_ROLL_WINDOW)
     if len(residual_history) < required_residual_len:
         raise ValueError(
             f"train_residual_history must include at least {required_residual_len} values for lag_count={lag_count}."
@@ -490,7 +508,11 @@ def forecast_mlp_residuals(
         curr_x2 = float(x2_test.iloc[i])
         x1_change_history = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
         x2_change_history = [x2_history[j] - x2_history[j - 1] for j in range(1, len(x2_history))]
-        roll_source = residual_history[-3:] if len(residual_history) >= 3 else residual_history
+        roll_source = (
+            residual_history[-RESIDUAL_ROLL_WINDOW:]
+            if len(residual_history) >= RESIDUAL_ROLL_WINDOW
+            else residual_history
+        )
         features: List[float] = [curr_x1, curr_x2, curr_x1 * curr_x2]
 
         for lag in range(1, lag_count + 1):
@@ -558,7 +580,7 @@ def evaluate_success_criteria(
     rolling_window_results_df: pd.DataFrame,
     min_single_split_improvement: float = SUCCESS_MIN_SINGLE_SPLIT_IMPROVEMENT,
     min_rolling_win_ratio: float = SUCCESS_MIN_ROLLING_WIN_RATIO,
-) -> Dict[str, float | bool]:
+) -> SuccessSummary:
     sorted_metrics = metrics_df.sort_values("RMSE").reset_index(drop=True)
     hybrid_row = sorted_metrics[sorted_metrics["Model"] == "Hibrit ARIMAX-MLP"]
     if hybrid_row.empty:
@@ -680,7 +702,7 @@ def run_single_window_models(
         x2_test=x2_val,
         train_x1_history=x1_train.tail(RESIDUAL_LAG_COUNT + 1),
         train_x2_history=x2_train.tail(RESIDUAL_LAG_COUNT + 1),
-        train_residual_history=residuals_train.tail(max(RESIDUAL_LAG_COUNT, 3)),
+        train_residual_history=residuals_train.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
     )
     mlp_residual_test_pred = forecast_mlp_residuals(
         mlp_model=mlp_model,
@@ -688,7 +710,7 @@ def run_single_window_models(
         x2_test=x2_test,
         train_x1_history=x1_train_val.tail(RESIDUAL_LAG_COUNT + 1),
         train_x2_history=x2_train_val.tail(RESIDUAL_LAG_COUNT + 1),
-        train_residual_history=residuals_train_val.tail(max(RESIDUAL_LAG_COUNT, 3)),
+        train_residual_history=residuals_train_val.tail(max(RESIDUAL_LAG_COUNT, RESIDUAL_ROLL_WINDOW)),
     )
     combiner = train_hybrid_combiner(
         y_val=y_val,
@@ -712,9 +734,9 @@ def run_single_window_models(
 
 
 def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    min_train_size = int(len(df_raw) * 0.5)
-    val_size = max(20, int(len(df_raw) * 0.15))
-    test_size = max(20, int(len(df_raw) * 0.10))
+    min_train_size = int(len(df_raw) * ROLLING_MIN_TRAIN_SIZE_RATIO)
+    val_size = max(ROLLING_MIN_VAL_ROWS, int(len(df_raw) * ROLLING_VAL_SIZE_RATIO))
+    test_size = max(ROLLING_MIN_TEST_ROWS, int(len(df_raw) * ROLLING_TEST_SIZE_RATIO))
     windows = build_expanding_windows(
         df=df_raw,
         min_train_size=min_train_size,
@@ -730,7 +752,7 @@ def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd
         val_scaled = pd.DataFrame(scaler.transform(val_raw), columns=val_raw.columns, index=val_raw.index)
         test_scaled = pd.DataFrame(scaler.transform(test_raw), columns=test_raw.columns, index=test_raw.index)
         train_df, val_df, test_df, _ = apply_stationarity_policy(train_scaled, val_scaled, test_scaled)
-        if len(train_df) < 40 or len(val_df) < 20 or len(test_df) < 20:
+        if len(train_df) < ROLLING_MIN_TRAIN_ROWS or len(val_df) < ROLLING_MIN_VAL_ROWS or len(test_df) < ROLLING_MIN_TEST_ROWS:
             continue
         y_test, preds, _, _ = run_single_window_models(train_df, val_df, test_df)
         metrics = calculate_metrics(y_test, preds)
@@ -934,7 +956,7 @@ def write_thesis_report(
     diagnostics_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
     rolling_summary_df: pd.DataFrame,
-    success_summary: Dict[str, float | bool],
+    success_summary: SuccessSummary,
     stress_table_df: pd.DataFrame,
     report_path: Path,
 ):

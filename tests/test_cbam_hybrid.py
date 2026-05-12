@@ -106,6 +106,9 @@ def test_build_residual_training_frame_creates_lagged_feature():
     assert expected_subset.issubset(set(X.columns))
     assert len(X) == len(y) == 6
     assert not X.isna().any().any()
+    first_idx = X.index[0]
+    assert X.loc[first_idx, "x2"] == x2.loc[first_idx]
+    assert X.loc[first_idx, "x1_x2_interaction"] == X.loc[first_idx, "x1"] * X.loc[first_idx, "x2"]
 
 
 def test_calculate_metrics_returns_rmse_mae_for_all_models():
