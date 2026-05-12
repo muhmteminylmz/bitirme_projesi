@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -144,7 +144,7 @@ def train_val_test_split_time_series(
 
 def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
     print("\nARIMAX modeli eğitiliyor...")
-    best_order: Tuple[int, int, int] | None = None
+    best_order: Optional[Tuple[int, int, int]] = None
     best_aic = np.inf
     for p in ARIMAX_P_RANGE:
         for q in ARIMAX_Q_RANGE:
@@ -248,6 +248,7 @@ def forecast_mlp_residuals(
 ) -> pd.Series:
     preds = []
     x1_history = list(train_x1_history.astype(float).values)
+    x1_change_history = [x1_history[j] - x1_history[j - 1] for j in range(1, len(x1_history))]
     residual_history = list(train_residual_history.astype(float).values)
 
     required_x1_len = lag_count + 1
@@ -258,20 +259,19 @@ def forecast_mlp_residuals(
 
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
-        x1_history.append(float(curr_x1))
-        recent_x1 = x1_history[-(lag_count + 2):]
-        x1_changes = [recent_x1[j] - recent_x1[j - 1] for j in range(1, len(recent_x1))]
         features = [float(curr_x1)]
 
         for lag in range(1, lag_count + 1):
             features.append(float(residual_history[-lag]))
         for lag in range(1, lag_count + 1):
-            features.append(float(x1_changes[-(lag + 1)]))
+            features.append(float(x1_change_history[-lag]))
 
         X_input = np.array([features], dtype=float)
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
         preds.append(pred_res)
         residual_history.append(pred_res)
+        x1_change_history.append(float(curr_x1) - x1_history[-1])
+        x1_history.append(float(curr_x1))
 
     return pd.Series(preds, index=x1_test.index)
 
