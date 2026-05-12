@@ -738,7 +738,9 @@ def run_rolling_backtest(df_raw: pd.DataFrame, max_windows: int = 4) -> Tuple[pd
         rolling_rows.append(metrics)
 
     if not rolling_rows:
-        return pd.DataFrame(columns=["Model", "RMSE_mean", "RMSE_std", "wins"]), pd.DataFrame(columns=["window", "Model", "RMSE", "MAE"])
+        empty_summary = pd.DataFrame(columns=["Model", "RMSE_mean", "RMSE_std", "wins"])
+        empty_windows = pd.DataFrame(columns=["window", "Model", "RMSE", "MAE"])
+        return empty_summary, empty_windows
 
     rolling_window_results = pd.concat(rolling_rows, ignore_index=True)
     wins = []
