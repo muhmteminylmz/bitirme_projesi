@@ -348,6 +348,7 @@ def fit_tuned_xgboost(
     ]
     best_model = None
     best_rmse = np.inf
+    best_params = None
     for params in search_space:
         model = XGBRegressor(**params, random_state=42)
         model.fit(X_train, y_train)
@@ -356,8 +357,10 @@ def fit_tuned_xgboost(
         if rmse < best_rmse:
             best_rmse = rmse
             best_model = model
+            best_params = params
     if best_model is None:
-        raise RuntimeError("XGBoost model could not be trained.")
+        raise RuntimeError(f"XGBoost model could not be trained. Search space: {search_space}")
+    print(f"Seçilen XGBoost parametreleri: {best_params}, val_rmse={best_rmse:.6f}")
     return best_model
 
 
@@ -449,6 +452,7 @@ def select_best_mlp_model(
     seeds = [42, 123]
     best_model = None
     best_rmse = np.inf
+    evaluated: List[Tuple[dict, int, float]] = []
     for config in search_space:
         for seed in seeds:
             model = build_and_train_mlp(
@@ -461,11 +465,12 @@ def select_best_mlp_model(
             )
             pred = model.predict(X_val, verbose=0).ravel()
             rmse = float(np.sqrt(mean_squared_error(y_val, pred)))
+            evaluated.append((config, seed, rmse))
             if rmse < best_rmse:
                 best_rmse = rmse
                 best_model = model
     if best_model is None:
-        raise RuntimeError("MLP model selection failed.")
+        raise RuntimeError(f"MLP model selection failed. Tried {len(evaluated)} config/seed combinations.")
     return best_model
 
 
@@ -497,6 +502,7 @@ def forecast_mlp_residuals(
         raise ValueError(
             f"train_x2_history must include at least {required_x1_len} values to compute {lag_count} lagged changes."
         )
+    # En uzun geçmiş ihtiyacı lag_count ve rolling pencere koşullarının maksimumudur.
     required_residual_len = max(lag_count, RESIDUAL_ROLL_WINDOW)
     if len(residual_history) < required_residual_len:
         raise ValueError(
