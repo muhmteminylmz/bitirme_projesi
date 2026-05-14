@@ -12,12 +12,15 @@ import pandas as pd
 import seaborn as sns
 import tensorflow as tf
 import yfinance as yf
+from pmdarima import auto_arima
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResultsWrapper
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.models import Sequential
 
 plt.rcParams["figure.dpi"] = 300
 plt.rcParams["savefig.dpi"] = 300
@@ -32,6 +35,7 @@ MODEL_COLORS = {
     "Baseline": "#6c7a89",
     "ARIMAX": "#4c78a8",
     "XGBoost": "#72b7b2",
+    "LSTM": "#f58518",
     "Hibrit ARIMAX-MLP": "#8b0000",
 }
 DEFAULT_MODEL_COLOR = "#808080"
@@ -120,8 +124,23 @@ def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8) -> 
 
 
 def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
-    print("\nARIMAX modeli eğitiliyor...")
-    model = SARIMAX(y, exog=exog, order=(1, 0, 1), enforce_stationarity=False, enforce_invertibility=False)
+    print("\nOptimal ARIMA parametreleri aranıyor...")
+    auto_model = auto_arima(
+        y,
+        exogenous=exog,
+        seasonal=False,
+        stepwise=True,
+        suppress_warnings=True,
+        trace=True,
+        error_action="ignore",
+        max_p=5,
+        max_q=5,
+        d=0,
+    )
+    order = auto_model.order
+    print(f"Seçilen ARIMA order: {order}")
+
+    model = SARIMAX(y, exog=exog, order=order, enforce_stationarity=False, enforce_invertibility=False)
     fitted_model = model.fit(disp=False)
     print(fitted_model.summary())
     return fitted_model
@@ -136,13 +155,21 @@ def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
 
 
 def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    # İYİLEŞTİRME: MLP'ye daha fazla geçmiş (lag) verisi vererek performansını artırıyoruz.
-    X = pd.DataFrame({
-        "x1": x1_train,
-        "x1_lag1": x1_train.shift(1),
-        "residual_lag1": residuals_train.shift(1),
-        "residual_lag2": residuals_train.shift(2)
-    })
+    X = pd.DataFrame(
+        {
+            "x1": x1_train,
+            "x1_lag1": x1_train.shift(1),
+            "x1_lag2": x1_train.shift(2),
+            "x1_lag3": x1_train.shift(3),
+            "residual_lag1": residuals_train.shift(1),
+            "residual_lag2": residuals_train.shift(2),
+            "residual_lag3": residuals_train.shift(3),
+            "rolling_mean_5": x1_train.rolling(5).mean(),
+            "rolling_std_5": x1_train.rolling(5).std(),
+            "rolling_mean_10": x1_train.rolling(10).mean(),
+            "rolling_std_10": x1_train.rolling(10).std(),
+        }
+    )
     X = X.dropna()
     y = residuals_train.loc[X.index]
     return X, y
@@ -153,51 +180,99 @@ def build_and_train_mlp(X_train: np.ndarray, y_train: np.ndarray):
     model = tf.keras.Sequential(
         [
             tf.keras.layers.Input(shape=(X_train.shape[1],)),
-            tf.keras.layers.Dense(64, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(32, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
             tf.keras.layers.Dense(16, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(1, activation="linear"),
+            tf.keras.layers.Dropout(0.1),
+            tf.keras.layers.Dense(8, activation="relu"),
+            tf.keras.layers.Dense(1),
         ]
     )
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
 
     early_stopping = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=MLP_PARAMS["patience"], restore_best_weights=True
+        monitor="val_loss", patience=15, restore_best_weights=True
     )
 
     model.fit(
         X_train,
         y_train,
-        epochs=MLP_PARAMS["epochs"],
-        batch_size=MLP_PARAMS["batch_size"],
-        validation_split=MLP_PARAMS["validation_split"],
+        epochs=300,
+        batch_size=8,
+        validation_split=0.2,
         callbacks=[early_stopping],
         verbose=0,
     )
     return model
 
 
-def forecast_mlp_residuals(mlp_model, x1_test: pd.Series, train_x1_last: float, train_res_last1: float, train_res_last2: float) -> pd.Series:
+def forecast_mlp_residuals(mlp_model, x1_train: pd.Series, residuals_train: pd.Series, x1_test: pd.Series) -> pd.Series:
+    if len(x1_train) < 10:
+        raise ValueError("MLP residual tahmini için x1_train en az 10 gözlem içermelidir.")
+    if len(residuals_train) < 3:
+        raise ValueError("MLP residual tahmini için residuals_train en az 3 gözlem içermelidir.")
+
     preds = []
-    curr_res1 = train_res_last1
-    curr_res2 = train_res_last2
-    curr_x1_lag = train_x1_last
+    x1_history = x1_train.astype(float).tolist()
+    residual_history = residuals_train.astype(float).tolist()
 
     for i in range(len(x1_test)):
         curr_x1 = x1_test.iloc[i]
-        X_input = np.array([[curr_x1, curr_x1_lag, curr_res1, curr_res2]], dtype=float)
+
+        x1_context = x1_history + [float(curr_x1)]
+        X_input = np.array(
+            [
+                [
+                    float(curr_x1),
+                    x1_history[-1],
+                    x1_history[-2],
+                    x1_history[-3],
+                    residual_history[-1],
+                    residual_history[-2],
+                    residual_history[-3],
+                    float(np.mean(x1_context[-5:])),
+                    float(np.std(x1_context[-5:], ddof=1)),
+                    float(np.mean(x1_context[-10:])),
+                    float(np.std(x1_context[-10:], ddof=1)),
+                ]
+            ],
+            dtype=float,
+        )
         pred_res = float(mlp_model.predict(X_input, verbose=0).ravel()[0])
         preds.append(pred_res)
-        
-        # Gelecek adım için lag'leri kaydırıyoruz
-        curr_res2 = curr_res1
-        curr_res1 = pred_res
-        curr_x1_lag = curr_x1
+
+        x1_history.append(float(curr_x1))
+        residual_history.append(pred_res)
 
     return pd.Series(preds, index=x1_test.index)
+
+
+def create_lstm_dataset(series, window_size: int = 5):
+    X = []
+    y = []
+    for i in range(window_size, len(series)):
+        X.append(series[i - window_size : i])
+        y.append(series[i])
+    return np.array(X), np.array(y)
+
+
+def train_lstm_model(train_series: pd.Series):
+    window_size = 5
+    X_train, y_train = create_lstm_dataset(train_series.values, window_size)
+    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+
+    model = Sequential([LSTM(16, input_shape=(window_size, 1)), Dense(1)])
+    model.compile(optimizer="adam", loss="mse")
+    model.fit(X_train, y_train, epochs=50, batch_size=8, verbose=0)
+    return model, window_size
+
+
+def forecast_lstm(model, full_series: np.ndarray, train_size: int, window_size: int):
+    predictions = []
+    for i in range(train_size, len(full_series)):
+        x_input = full_series[i - window_size : i]
+        x_input = x_input.reshape(1, window_size, 1)
+        pred = model.predict(x_input, verbose=0)[0][0]
+        predictions.append(pred)
+    return np.array(predictions)
 
 
 def calculate_metrics(y_true: pd.Series, predictions_dict: Dict[str, pd.Series]) -> pd.DataFrame:
@@ -466,22 +541,31 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     xgb_model = fit_xgboost_regressor(X_train_bench, y_train)
     xgb_pred = pd.Series(xgb_model.predict(X_test_bench), index=y_test.index, name="XGBoost")
 
+    print("\nLSTM benchmark eğitiliyor...")
+    lstm_model, lstm_window = train_lstm_model(y_train)
+    lstm_preds = forecast_lstm(lstm_model, df_stationary[TARGET_TICKER].values, len(y_train), lstm_window)
+    lstm_pred = pd.Series(lstm_preds, index=y_test.index[: len(lstm_preds)], name="LSTM")
+
     print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
     X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train)
     mlp_model = build_and_train_mlp(X_mlp_train.values, y_mlp_train.values)
 
-    # İYİLEŞTİRME: MLP test verisi için geçmiş 2 günün hata payı da sağlanıyor.
     mlp_residual_test_pred = forecast_mlp_residuals(
-        mlp_model=mlp_model, 
-        x1_test=x1_test, 
-        train_x1_last=float(x1_train.iloc[-1]),
-        train_res_last1=float(residuals_train.iloc[-1]),
-        train_res_last2=float(residuals_train.iloc[-2])
+        mlp_model=mlp_model,
+        x1_train=x1_train,
+        residuals_train=residuals_train,
+        x1_test=x1_test,
     )
     hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
     hybrid_pred.name = "Hibrit ARIMAX-MLP"
 
-    predictions = {"Baseline": baseline_pred, "ARIMAX": arimax_test_pred, "XGBoost": xgb_pred, "Hibrit ARIMAX-MLP": hybrid_pred}
+    predictions = {
+        "Baseline": baseline_pred,
+        "ARIMAX": arimax_test_pred,
+        "XGBoost": xgb_pred,
+        "LSTM": lstm_pred,
+        "Hibrit ARIMAX-MLP": hybrid_pred,
+    }
     predictions_df = pd.DataFrame(predictions).reindex(y_test.index)
     residuals_df = pd.DataFrame(
         {"XGBoost": y_test - predictions_df["XGBoost"], "Hibrit ARIMAX-MLP": y_test - predictions_df["Hibrit ARIMAX-MLP"]},
