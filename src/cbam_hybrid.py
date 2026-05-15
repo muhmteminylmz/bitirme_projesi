@@ -409,6 +409,20 @@ def fit_sarimax(y: pd.Series, exog: pd.DataFrame) -> SARIMAXResultsWrapper:
     return fitted_model
 
 
+def forecast_arimax_val_test(
+    arimax_model: SARIMAXResultsWrapper,
+    exog_val: pd.DataFrame,
+    exog_test: pd.DataFrame,
+    val_index: pd.Index,
+    test_index: pd.Index,
+) -> Tuple[pd.Series, pd.Series]:
+    exog_horizon = pd.concat([exog_val, exog_test])
+    horizon_pred = arimax_model.get_forecast(steps=len(exog_horizon), exog=exog_horizon).predicted_mean
+    arimax_val_pred = pd.Series(horizon_pred.iloc[: len(exog_val)].values, index=val_index, name="ARIMAX_VAL")
+    arimax_test_pred = pd.Series(horizon_pred.iloc[len(exog_val) :].values, index=test_index, name="ARIMAX")
+    return arimax_val_pred, arimax_test_pred
+
+
 def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
     from xgboost import XGBRegressor
 
@@ -882,19 +896,12 @@ def run_pipeline(interval: str = "1d", config: RecoveryConfig | None = None) -> 
     print("\n=== Modül 2: ARIMAX Eğitimi ve Benchmark'lar ===")
     arimax_model = fit_sarimax(y_train, exog=arimax_exog_train)
     arimax_coef_table_str = str(arimax_model.summary().tables[1])
-    arimax_val_pred = pd.Series(
-        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_val) - 1, exog=arimax_exog_val).values,
-        index=y_val.index,
-        name="ARIMAX_VAL",
-    )
-    arimax_test_pred = pd.Series(
-        arimax_model.predict(
-            start=len(y_train) + len(y_val),
-            end=len(y_train) + len(y_val) + len(y_test) - 1,
-            exog=arimax_exog_test,
-        ).values,
-        index=y_test.index,
-        name="ARIMAX",
+    arimax_val_pred, arimax_test_pred = forecast_arimax_val_test(
+        arimax_model=arimax_model,
+        exog_val=arimax_exog_val,
+        exog_test=arimax_exog_test,
+        val_index=y_val.index,
+        test_index=y_test.index,
     )
 
     residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
