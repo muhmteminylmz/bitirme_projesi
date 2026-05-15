@@ -19,6 +19,7 @@ from src.cbam_hybrid import (
     evaluate_success_criteria,
     enforce_stationarity,
     find_first_breakpoint,
+    forecast_arimax_val_test,
     train_test_split_time_series,
     train_hybrid_combiner,
     train_val_test_split_time_series,
@@ -329,3 +330,36 @@ def test_breakpoint_detection_output():
     assert "İlk kırılma noktası" in report
     first_break_module = breakdown[breakdown["rmse"] > 0.2].iloc[0]["module"]
     assert first_break_module in report
+
+
+def test_forecast_arimax_val_test_uses_combined_exog_horizon_and_splits_predictions():
+    class DummyForecast:
+        def __init__(self, predicted_mean):
+            self.predicted_mean = predicted_mean
+
+    class DummyModel:
+        def __init__(self):
+            self.calls = []
+
+        def get_forecast(self, steps, exog):
+            self.calls.append((steps, exog.copy()))
+            return DummyForecast(pd.Series(np.arange(steps, dtype=float)))
+
+    val_idx = pd.date_range("2024-01-01", periods=3, freq="D")
+    test_idx = pd.date_range("2024-01-04", periods=2, freq="D")
+    exog_val = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}, index=val_idx)
+    exog_test = pd.DataFrame({"a": [7.0, 8.0], "b": [9.0, 10.0]}, index=test_idx)
+    model = DummyModel()
+
+    val_pred, test_pred = forecast_arimax_val_test(model, exog_val, exog_test, val_idx, test_idx)
+
+    assert len(model.calls) == 1
+    called_steps, called_exog = model.calls[0]
+    assert called_steps == len(exog_val) + len(exog_test)
+    assert list(called_exog.index) == list(pd.concat([exog_val, exog_test]).index)
+    assert list(val_pred.index) == list(val_idx)
+    assert list(test_pred.index) == list(test_idx)
+    assert val_pred.name == "ARIMAX_VAL"
+    assert test_pred.name == "ARIMAX"
+    assert np.allclose(val_pred.values, [0.0, 1.0, 2.0])
+    assert np.allclose(test_pred.values, [3.0, 4.0])
