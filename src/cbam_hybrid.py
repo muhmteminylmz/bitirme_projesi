@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,6 +44,16 @@ DEFAULT_MODEL_COLOR = "#808080"
 STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 LSTM_WINDOW_SIZE = 20
 LSTM_EPOCHS = 80
+STABLE_RMSE_BAND_UPPER = 0.60
+MIN_HYBRID_IMPROVEMENT = 0.01
+MIN_ROLLING_WIN_RATIO = 0.50
+
+
+@dataclass
+class RecoveryConfig:
+    use_usd_target: bool = False
+    include_fx_feature: bool = False
+    use_learned_hybrid_combiner: bool = True
 
 
 @dataclass
@@ -53,6 +63,14 @@ class PipelineResult:
     residuals: pd.DataFrame
     diagnostics: pd.DataFrame
     stress_table: pd.DataFrame
+
+
+@dataclass
+class LeakageSafeSplits:
+    train: pd.DataFrame
+    val: pd.DataFrame
+    test: pd.DataFrame
+    stationarity: Dict[str, Dict[str, float]]
 
 
 def fetch_yfinance_data(
@@ -171,6 +189,203 @@ def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8) -> 
     return df.iloc[:train_size].copy(), df.iloc[train_size:].copy()
 
 
+def train_val_test_split_time_series(
+    df: pd.DataFrame, train_ratio: float = 0.7, val_ratio: float = 0.15, test_ratio: float = 0.15
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
+        raise ValueError("train_ratio + val_ratio + test_ratio toplamı 1.0 olmalıdır.")
+    n = len(df)
+    train_end = int(n * train_ratio)
+    val_end = train_end + int(n * val_ratio)
+    train = df.iloc[:train_end].copy()
+    val = df.iloc[train_end:val_end].copy()
+    test = df.iloc[val_end:].copy()
+    return train, val, test
+
+
+def apply_stationarity_policy(
+    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, float]]]:
+    train_stationary = train_df.copy()
+    val_stationary = val_df.copy()
+    test_stationary = test_df.copy()
+    adf_results: Dict[str, Dict[str, float]] = {}
+
+    def safe_adf_pvalue(series: pd.Series) -> float:
+        s = series.dropna()
+        if s.empty or s.nunique() <= 1:
+            return 1.0
+        return float(adfuller(s)[1])
+
+    for col in train_df.columns:
+        initial_p = safe_adf_pvalue(train_df[col])
+        if initial_p > 0.05:
+            train_stationary[col] = train_df[col].diff()
+            val_bridge = pd.concat([train_df[col].iloc[[-1]], val_df[col]])
+            val_stationary[col] = val_bridge.diff().iloc[1:]
+            test_bridge = pd.concat([val_df[col].iloc[[-1]], test_df[col]])
+            test_stationary[col] = test_bridge.diff().iloc[1:]
+            final_p = safe_adf_pvalue(train_stationary[col])
+            adf_results[col] = {"initial_p": initial_p, "differenced": True, "final_p": final_p}
+        else:
+            adf_results[col] = {"initial_p": initial_p, "differenced": False, "final_p": initial_p}
+
+    train_stationary = train_stationary.dropna(how="any")
+    val_stationary = val_stationary.dropna(how="any")
+    test_stationary = test_stationary.dropna(how="any")
+    val_stationary = val_stationary.loc[val_df.index.intersection(val_stationary.index)]
+    test_stationary = test_stationary.loc[test_df.index.intersection(test_stationary.index)]
+    return train_stationary, val_stationary, test_stationary, adf_results
+
+
+def validate_split_integrity(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    if train_df.empty or val_df.empty or test_df.empty:
+        raise ValueError("Train/val/test split boş olamaz.")
+    if not train_df.index.is_monotonic_increasing or not val_df.index.is_monotonic_increasing or not test_df.index.is_monotonic_increasing:
+        raise ValueError("Tarih indeksleri artan sırada olmalıdır.")
+    if train_df.index.max() >= val_df.index.min() or val_df.index.max() >= test_df.index.min():
+        raise ValueError("Train/val/test aralıkları çakışıyor.")
+
+
+def prepare_leakage_safe_splits(
+    df_prices: pd.DataFrame, train_ratio: float = 0.7, val_ratio: float = 0.15, test_ratio: float = 0.15
+) -> LeakageSafeSplits:
+    returns = compute_log_returns(df_prices)
+    train_raw, val_raw, test_raw = train_val_test_split_time_series(
+        returns, train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio
+    )
+    train_stationary, val_stationary, test_stationary, stationarity = apply_stationarity_policy(train_raw, val_raw, test_raw)
+    validate_split_integrity(train_stationary, val_stationary, test_stationary)
+    combined = pd.concat([train_stationary, val_stationary, test_stationary]).sort_index()
+    combined_scaled, _ = clean_and_scale_data(combined, fit_df=train_stationary)
+    train = combined_scaled.loc[train_stationary.index]
+    val = combined_scaled.loc[val_stationary.index]
+    test = combined_scaled.loc[test_stationary.index]
+    return LeakageSafeSplits(train=train, val=val, test=test, stationarity=stationarity)
+
+
+def build_expanding_windows(
+    df: pd.DataFrame, min_train_size: int, val_size: int, test_size: int, step_size: int, max_windows: int = 5
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    windows: List[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = []
+    n = len(df)
+    start_train_size = min_train_size
+    while start_train_size + val_size + test_size <= n and len(windows) < max_windows:
+        train = df.iloc[:start_train_size].copy()
+        val = df.iloc[start_train_size : start_train_size + val_size].copy()
+        test = df.iloc[start_train_size + val_size : start_train_size + val_size + test_size].copy()
+        validate_split_integrity(train, val, test)
+        windows.append((train, val, test))
+        start_train_size += step_size
+    return windows
+
+
+def validate_data_quality(df_prices: pd.DataFrame) -> Dict[str, float | bool]:
+    missing_ratio = float(df_prices.isna().mean().mean())
+    monotonic_index = bool(df_prices.index.is_monotonic_increasing)
+    returns = compute_log_returns(df_prices.ffill().bfill())
+    jump_ratio = float((returns.abs() > returns.abs().quantile(0.99)).mean().mean()) if not returns.empty else 0.0
+    quality_pass = bool(missing_ratio < 0.01 and monotonic_index and jump_ratio < 0.05)
+    return {
+        "missing_ratio": missing_ratio,
+        "monotonic_index": monotonic_index,
+        "jump_ratio": jump_ratio,
+        "quality_pass": quality_pass,
+    }
+
+
+def train_hybrid_combiner(y_true: pd.Series, arimax_pred: pd.Series, mlp_residual_pred: pd.Series) -> LinearRegression:
+    aligned = pd.concat(
+        [y_true.rename("y"), arimax_pred.rename("arimax"), mlp_residual_pred.rename("mlp_residual")], axis=1
+    ).dropna()
+    X = aligned[["arimax", "mlp_residual"]]
+    y = aligned["y"]
+    model = LinearRegression()
+    model.fit(X, y)
+    return model
+
+
+def apply_hybrid_combiner(model: LinearRegression, arimax_pred: pd.Series, mlp_residual_pred: pd.Series) -> pd.Series:
+    features = pd.concat([arimax_pred.rename("arimax"), mlp_residual_pred.rename("mlp_residual")], axis=1).dropna()
+    preds = model.predict(features)
+    return pd.Series(preds, index=features.index, name="Hibrit ARIMAX-MLP")
+
+
+def evaluate_success_criteria(
+    metrics_df: pd.DataFrame, rolling_df: pd.DataFrame, stable_rmse_upper: float = STABLE_RMSE_BAND_UPPER
+) -> Dict[str, float | bool]:
+    hybrid_row = metrics_df[metrics_df["Model"] == "Hibrit ARIMAX-MLP"].iloc[0]
+    others = metrics_df[metrics_df["Model"] != "Hibrit ARIMAX-MLP"]
+    second_best_rmse = float(others["RMSE"].min()) if not others.empty else float(hybrid_row["RMSE"])
+    hybrid_rmse = float(hybrid_row["RMSE"])
+    single_split_improvement = float(second_best_rmse - hybrid_rmse)
+
+    rolling_wins = 0
+    total_windows = 0
+    if not rolling_df.empty:
+        for _, g in rolling_df.groupby("window"):
+            if "Hibrit ARIMAX-MLP" not in set(g["Model"]):
+                continue
+            total_windows += 1
+            h_rmse = float(g[g["Model"] == "Hibrit ARIMAX-MLP"]["RMSE"].iloc[0])
+            best_rmse = float(g["RMSE"].min())
+            if np.isclose(h_rmse, best_rmse) or h_rmse <= best_rmse:
+                rolling_wins += 1
+    rolling_win_ratio = float(rolling_wins / total_windows) if total_windows else 0.0
+
+    single_split_ok = single_split_improvement >= MIN_HYBRID_IMPROVEMENT
+    rolling_ok = rolling_win_ratio >= MIN_ROLLING_WIN_RATIO
+    stable_ok = hybrid_rmse <= stable_rmse_upper
+    overall_pass = bool(single_split_ok and rolling_ok and stable_ok)
+
+    if single_split_ok and not rolling_ok:
+        overall_pass = False
+
+    return {
+        "single_split_improvement": single_split_improvement,
+        "rolling_win_ratio": rolling_win_ratio,
+        "single_split_ok": single_split_ok,
+        "rolling_ok": rolling_ok,
+        "stable_ok": stable_ok,
+        "pass": overall_pass,
+    }
+
+
+def run_ablation_experiments(y_true: pd.Series, predictions: Dict[str, pd.Series]) -> pd.DataFrame:
+    rows = []
+    for variant, pred in predictions.items():
+        aligned = pd.concat([y_true.rename("y"), pred.rename("p")], axis=1).dropna()
+        if aligned.empty:
+            continue
+        rmse = float(np.sqrt(mean_squared_error(aligned["y"], aligned["p"])))
+        mae = float(mean_absolute_error(aligned["y"], aligned["p"]))
+        rows.append({"Variant": variant, "RMSE": rmse, "MAE": mae})
+    return pd.DataFrame(rows).sort_values(by="RMSE").reset_index(drop=True)
+
+
+def build_module_breakdown(
+    y_true: pd.Series, predictions: Dict[str, pd.Series], rolling_summary: pd.DataFrame
+) -> pd.DataFrame:
+    breakdown_rows = []
+    for module_name, pred in predictions.items():
+        aligned = pd.concat([y_true.rename("y"), pred.rename("p")], axis=1).dropna()
+        if aligned.empty:
+            continue
+        rmse = float(np.sqrt(mean_squared_error(aligned["y"], aligned["p"])))
+        breakdown_rows.append({"module": module_name, "rmse": rmse, "source": "single_split"})
+    if not rolling_summary.empty and {"Model", "RMSE_mean"}.issubset(set(rolling_summary.columns)):
+        for _, row in rolling_summary.iterrows():
+            breakdown_rows.append({"module": f"{row['Model']} (rolling)", "rmse": float(row["RMSE_mean"]), "source": "rolling"})
+    return pd.DataFrame(breakdown_rows).sort_values(by="rmse").reset_index(drop=True)
+
+
+def find_first_breakpoint(breakdown: pd.DataFrame, threshold: float = 0.20) -> str:
+    over = breakdown[breakdown["rmse"] > threshold]
+    if over.empty:
+        return f"İlk kırılma noktası bulunamadı (threshold={threshold:.3f})."
+    first = over.iloc[0]
+    return f"İlk kırılma noktası: {first['module']} (rmse={first['rmse']:.6f})"
+
 def fit_sarimax(y: pd.Series, exog: pd.DataFrame) -> SARIMAXResultsWrapper:
     print("\nOptimal ARIMA parametreleri aranıyor...")
     auto_model = auto_arima(
@@ -202,24 +417,51 @@ def fit_xgboost_regressor(X: pd.DataFrame, y: pd.Series):
     return model
 
 
-def build_residual_training_frame(x1_train: pd.Series, residuals_train: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    X = pd.DataFrame(
-        {
-            "x1": x1_train,
-            "x1_lag1": x1_train.shift(1),
-            "x1_lag2": x1_train.shift(2),
-            "x1_lag3": x1_train.shift(3),
-            "residual_lag1": residuals_train.shift(1),
-            "residual_lag2": residuals_train.shift(2),
-            "residual_lag3": residuals_train.shift(3),
-            "rolling_mean_5": x1_train.rolling(5).mean(),
-            "rolling_std_5": x1_train.rolling(5).std(),
-            "rolling_mean_10": x1_train.rolling(10).mean(),
-            "rolling_std_10": x1_train.rolling(10).std(),
-        }
-    )
+def build_residual_training_frame(
+    x1_train: pd.Series,
+    residuals_train: pd.Series,
+    x2_train: pd.Series | None = None,
+    feature_mode: str = "extended",
+) -> Tuple[pd.DataFrame, pd.Series]:
+    if feature_mode not in {"extended", "legacy"}:
+        raise ValueError("feature_mode 'extended' veya 'legacy' olmalıdır.")
+
+    if feature_mode == "legacy":
+        X = pd.DataFrame(
+            {
+                "x1": x1_train,
+                "x1_lag1": x1_train.shift(1),
+                "x1_lag2": x1_train.shift(2),
+                "x1_lag3": x1_train.shift(3),
+                "residual_lag1": residuals_train.shift(1),
+                "residual_lag2": residuals_train.shift(2),
+                "residual_lag3": residuals_train.shift(3),
+                "rolling_mean_5": x1_train.rolling(5).mean(),
+                "rolling_std_5": x1_train.rolling(5).std(),
+                "rolling_mean_10": x1_train.rolling(10).mean(),
+                "rolling_std_10": x1_train.rolling(10).std(),
+            }
+        )
+    else:
+        x2 = x2_train.reindex(x1_train.index) if x2_train is not None else x1_train.rename("x2_proxy")
+        X = pd.DataFrame(
+            {
+                "x1": x1_train,
+                "x2": x2,
+                "x1_x2_interaction": x1_train * x2,
+                "x1_lag1": x1_train.shift(1),
+                "x2_lag1": x2.shift(1),
+                "x1_change_lag1": x1_train.diff().shift(1),
+                "x2_change_lag1": x2.diff().shift(1),
+                "residual_lag1": residuals_train.shift(1),
+                "residual_lag5": residuals_train.shift(5),
+                "residual_lag6": residuals_train.shift(6),
+                "residual_roll_mean_3": residuals_train.rolling(3).mean(),
+                "residual_roll_std_3": residuals_train.rolling(3).std(),
+            }
+        )
     X = X.dropna()
-    y = residuals_train.loc[X.index]
+    y = residuals_train.reindex(X.index)
     return X, y
 
 
@@ -575,11 +817,16 @@ def write_thesis_report(
     print(f"\nTez raporu oluşturuldu: {report_path}")
 
 
-def run_pipeline(interval: str = "1d") -> PipelineResult:
+def run_pipeline(interval: str = "1d", config: RecoveryConfig | None = None) -> PipelineResult:
+    cfg = config or RecoveryConfig()
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(interval=interval)
-    df_raw_usd = convert_target_to_usd(df_raw)
-    model_input_raw = df_raw_usd[[TARGET_USD_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]].copy()
+    df_raw_usd = convert_target_to_usd(df_raw) if cfg.use_usd_target else df_raw.copy()
+    target_col = TARGET_USD_TICKER if cfg.use_usd_target else TARGET_TICKER
+    feature_cols = [CARBON_TICKER, IRON_TICKER]
+    if cfg.include_fx_feature:
+        feature_cols.append(FX_TICKER)
+    model_input_raw = df_raw_usd[[target_col, *feature_cols]].copy()
 
     print("\n--- Temel İstatistikler (Ham Veri) ---")
     basic_stats = model_input_raw.describe()
@@ -592,12 +839,15 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     plot_correlation_heatmap(corr_matrix)
 
     df_returns = compute_log_returns(model_input_raw)
-    train_returns, test_returns = train_test_split_time_series(df_returns)
-    train_stationary, test_stationary, adf_results = apply_stationarity_policy_train_test(train_returns, test_returns)
+    train_returns, val_returns, test_returns = train_val_test_split_time_series(df_returns)
+    train_stationary, val_stationary, test_stationary, adf_results = apply_stationarity_policy(
+        train_returns, val_returns, test_returns
+    )
 
-    combined_stationary = pd.concat([train_stationary, test_stationary]).sort_index()
+    combined_stationary = pd.concat([train_stationary, val_stationary, test_stationary]).sort_index()
     combined_scaled, _ = clean_and_scale_data(combined_stationary, fit_df=train_stationary)
     train_df = combined_scaled.loc[train_stationary.index]
+    val_df = combined_scaled.loc[val_stationary.index]
     test_df = combined_scaled.loc[test_stationary.index]
 
     print("\n--- Betimsel İstatistikler (Birinci Farkı Alınmış Seriler) ---")
@@ -606,22 +856,43 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     diff_stats.columns = ["Ortalama (Mean)", "Standart Sapma (Std)", "Min", "Max", "Çarpıklık (Skewness)"]
     print(diff_stats.to_string(float_format=lambda x: f"{x:.6f}"))
 
-    y_train = train_df[TARGET_USD_TICKER]
+    y_train = train_df[target_col]
+    y_val = val_df[target_col]
+    y_test = test_df[target_col]
     x1_train = train_df[CARBON_TICKER]
-    x2_train = train_df[IRON_TICKER]
-    fx_train = train_df[FX_TICKER]
-    y_test = test_df[TARGET_USD_TICKER]
+    x1_val = val_df[CARBON_TICKER]
     x1_test = test_df[CARBON_TICKER]
+    x2_train = train_df[IRON_TICKER]
+    x2_val = val_df[IRON_TICKER]
     x2_test = test_df[IRON_TICKER]
-    fx_test = test_df[FX_TICKER]
-    arimax_exog_train = pd.DataFrame({CARBON_TICKER: x1_train, IRON_TICKER: x2_train, FX_TICKER: fx_train})
-    arimax_exog_test = pd.DataFrame({CARBON_TICKER: x1_test, IRON_TICKER: x2_test, FX_TICKER: fx_test})
+    if cfg.include_fx_feature:
+        fx_train = train_df[FX_TICKER]
+        fx_val = val_df[FX_TICKER]
+        fx_test = test_df[FX_TICKER]
+        arimax_exog_train = pd.DataFrame({CARBON_TICKER: x1_train, IRON_TICKER: x2_train, FX_TICKER: fx_train})
+        arimax_exog_val = pd.DataFrame({CARBON_TICKER: x1_val, IRON_TICKER: x2_val, FX_TICKER: fx_val})
+        arimax_exog_test = pd.DataFrame({CARBON_TICKER: x1_test, IRON_TICKER: x2_test, FX_TICKER: fx_test})
+        bench_cols = [CARBON_TICKER, IRON_TICKER, FX_TICKER]
+    else:
+        arimax_exog_train = pd.DataFrame({CARBON_TICKER: x1_train, IRON_TICKER: x2_train})
+        arimax_exog_val = pd.DataFrame({CARBON_TICKER: x1_val, IRON_TICKER: x2_val})
+        arimax_exog_test = pd.DataFrame({CARBON_TICKER: x1_test, IRON_TICKER: x2_test})
+        bench_cols = [CARBON_TICKER, IRON_TICKER]
 
     print("\n=== Modül 2: ARIMAX Eğitimi ve Benchmark'lar ===")
     arimax_model = fit_sarimax(y_train, exog=arimax_exog_train)
     arimax_coef_table_str = str(arimax_model.summary().tables[1])
+    arimax_val_pred = pd.Series(
+        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_val) - 1, exog=arimax_exog_val).values,
+        index=y_val.index,
+        name="ARIMAX_VAL",
+    )
     arimax_test_pred = pd.Series(
-        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_test) - 1, exog=arimax_exog_test).values,
+        arimax_model.predict(
+            start=len(y_train) + len(y_val),
+            end=len(y_train) + len(y_val) + len(y_test) - 1,
+            exog=arimax_exog_test,
+        ).values,
         index=y_test.index,
         name="ARIMAX",
     )
@@ -629,8 +900,8 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
 
     baseline_model = LinearRegression()
-    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
-    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    X_train_bench = train_df[bench_cols]
+    X_test_bench = test_df[bench_cols]
     baseline_model.fit(X_train_bench, y_train)
     baseline_pred = pd.Series(baseline_model.predict(X_test_bench), index=y_test.index, name="Baseline")
 
@@ -644,16 +915,26 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     lstm_pred = pd.Series(lstm_preds, index=y_test.index[: len(lstm_preds)], name="LSTM")
 
     print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
-    X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train)
+    X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train, feature_mode="legacy")
     mlp_model = build_and_train_mlp(X_mlp_train.values, y_mlp_train.values)
 
-    mlp_residual_test_pred = forecast_mlp_residuals(
+    mlp_residual_val_pred = forecast_mlp_residuals(
         mlp_model=mlp_model,
         x1_train=x1_train,
         residuals_train=residuals_train,
+        x1_test=x1_val,
+    )
+    mlp_residual_test_pred = forecast_mlp_residuals(
+        mlp_model=mlp_model,
+        x1_train=pd.concat([x1_train, x1_val]),
+        residuals_train=pd.concat([residuals_train, mlp_residual_val_pred]),
         x1_test=x1_test,
     )
-    hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
+    if cfg.use_learned_hybrid_combiner:
+        combiner = train_hybrid_combiner(y_val, arimax_val_pred, mlp_residual_val_pred)
+        hybrid_pred = apply_hybrid_combiner(combiner, arimax_test_pred, mlp_residual_test_pred)
+    else:
+        hybrid_pred = arimax_test_pred.add(mlp_residual_test_pred, fill_value=0.0)
     hybrid_pred.name = "Hibrit ARIMAX-MLP"
 
     predictions = {

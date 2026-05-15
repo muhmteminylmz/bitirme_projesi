@@ -17,6 +17,14 @@ Model:
 2. **MLP** ile ARIMAX residual tahmini (X1/X2, residual lagleri, fiyat lagleri, değişim lagleri, rolling residual istatistikleri)
 3. **Hibrit tahmin** = validation üzerinde öğrenilen lineer meta-birleştirici (ARIMAX + MLP residual)
 
+Kısa vadeli güvenli varsayılan (RMSE kurtarma):
+
+- Varsayılan pipeline artık **son iyi konfigürasyon** ile açılır:
+  - `use_usd_target=False`
+  - `include_fx_feature=False`
+  - `use_learned_hybrid_combiner=True`
+- Yeni değişiklikler `RecoveryConfig` ile feature-flag üzerinden kontrollü açılır/kapatılır.
+
 ## Notebook Yapısı
 
 Notebook/Colab akışı 6 modül içerir:
@@ -57,6 +65,20 @@ pip install -r requirements.txt
 
 ```bash
 python main.py
+```
+
+Feature-flag ile çalıştırma:
+
+```python
+from src.cbam_hybrid import RecoveryConfig, run_pipeline
+
+run_pipeline(
+    config=RecoveryConfig(
+        use_usd_target=True,
+        include_fx_feature=True,
+        use_learned_hybrid_combiner=True,
+    )
+)
 ```
 
 Testler:
