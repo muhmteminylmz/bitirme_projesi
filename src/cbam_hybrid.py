@@ -19,7 +19,7 @@ from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResultsWrapper
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.models import Sequential
 
 plt.rcParams["figure.dpi"] = 300
@@ -29,6 +29,8 @@ sns.set_style("whitegrid")
 TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
+FX_TICKER = "USDTRY=X"
+TARGET_USD_TICKER = f"{TARGET_TICKER}_USD"
 XGBOOST_PARAMS = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
 MLP_PARAMS = {"epochs": 200, "batch_size": 16, "validation_split": 0.2, "patience": 10}
 MODEL_COLORS = {
@@ -40,6 +42,8 @@ MODEL_COLORS = {
 }
 DEFAULT_MODEL_COLOR = "#808080"
 STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
+LSTM_WINDOW_SIZE = 20
+LSTM_EPOCHS = 80
 
 
 @dataclass
@@ -56,7 +60,7 @@ def fetch_yfinance_data(
     end: str = "2026-04-25",
     interval: str = "1d",
 ) -> pd.DataFrame:
-    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER]
+    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
     raw = yf.download(
         tickers=tickers,
         start=start,
@@ -84,11 +88,55 @@ def fetch_yfinance_data(
     return close_df
 
 
-def clean_and_scale_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, MinMaxScaler]:
+def clean_and_scale_data(df: pd.DataFrame, fit_df: pd.DataFrame | None = None) -> Tuple[pd.DataFrame, MinMaxScaler]:
     cleaned = df.copy().sort_index().ffill().bfill()
+    fit_cleaned = fit_df.copy().sort_index().ffill().bfill() if fit_df is not None else cleaned
     scaler = MinMaxScaler()
-    scaled = pd.DataFrame(scaler.fit_transform(cleaned), columns=cleaned.columns, index=cleaned.index)
+    scaler.fit(fit_cleaned)
+    scaled = pd.DataFrame(scaler.transform(cleaned), columns=cleaned.columns, index=cleaned.index)
     return scaled, scaler
+
+
+def compute_log_returns(df: pd.DataFrame) -> pd.DataFrame:
+    returns = np.log(df / df.shift(1))
+    return returns.dropna(how="any")
+
+
+def convert_target_to_usd(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out[TARGET_USD_TICKER] = out[TARGET_TICKER] / out[FX_TICKER]
+    return out
+
+
+def apply_stationarity_policy_train_test(
+    train_df: pd.DataFrame, test_df: pd.DataFrame
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, float]]]:
+    train_stationary = train_df.copy()
+    test_stationary = test_df.copy()
+    adf_results: Dict[str, Dict[str, float]] = {}
+
+    def safe_adf_pvalue(series: pd.Series) -> float:
+        s = series.dropna()
+        if s.empty or s.nunique() <= 1:
+            return 1.0
+        return float(adfuller(s)[1])
+
+    for col in train_df.columns:
+        initial_p = safe_adf_pvalue(train_df[col])
+        if initial_p > 0.05:
+            train_stationary[col] = train_df[col].diff()
+            bridge = pd.concat([train_df[col].iloc[[-1]], test_df[col]])
+            test_stationary[col] = bridge.diff().iloc[1:]
+            final_p = safe_adf_pvalue(train_stationary[col])
+            adf_results[col] = {"initial_p": initial_p, "differenced": True, "final_p": final_p}
+        else:
+            adf_results[col] = {"initial_p": initial_p, "differenced": False, "final_p": initial_p}
+
+    train_stationary = train_stationary.dropna(how="any")
+    test_stationary = test_stationary.dropna(how="any")
+    aligned_test_index = test_df.index.intersection(test_stationary.index)
+    test_stationary = test_stationary.loc[aligned_test_index]
+    return train_stationary, test_stationary, adf_results
 
 
 def enforce_stationarity(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
@@ -123,7 +171,7 @@ def train_test_split_time_series(df: pd.DataFrame, train_ratio: float = 0.8) -> 
     return df.iloc[:train_size].copy(), df.iloc[train_size:].copy()
 
 
-def fit_sarimax(y: pd.Series, exog: pd.Series) -> SARIMAXResultsWrapper:
+def fit_sarimax(y: pd.Series, exog: pd.DataFrame) -> SARIMAXResultsWrapper:
     print("\nOptimal ARIMA parametreleri aranıyor...")
     auto_model = auto_arima(
         y,
@@ -255,13 +303,21 @@ def create_lstm_dataset(series, window_size: int = 5):
 
 
 def train_lstm_model(train_series: pd.Series):
-    window_size = 5
+    window_size = LSTM_WINDOW_SIZE
     X_train, y_train = create_lstm_dataset(train_series.values, window_size)
     X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
 
-    model = Sequential([LSTM(16, input_shape=(window_size, 1)), Dense(1)])
+    model = Sequential(
+        [
+            LSTM(64, return_sequences=True, input_shape=(window_size, 1)),
+            Dropout(0.2),
+            LSTM(32),
+            Dropout(0.2),
+            Dense(1),
+        ]
+    )
     model.compile(optimizer="adam", loss="mse")
-    model.fit(X_train, y_train, epochs=50, batch_size=8, verbose=0)
+    model.fit(X_train, y_train, epochs=LSTM_EPOCHS, batch_size=16, verbose=0)
     return model, window_size
 
 
@@ -397,6 +453,36 @@ def run_stress_test(base_price: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def run_carbon_stress_test(
+    arimax_model: SARIMAXResultsWrapper,
+    exog_test: pd.DataFrame,
+    baseline_forecast: pd.Series,
+    train_size: int,
+) -> pd.DataFrame:
+    rows = []
+    for scenario, shock in STRESS_BANDS.items():
+        shocked_exog = exog_test.copy()
+        shocked_exog[CARBON_TICKER] = shocked_exog[CARBON_TICKER] * (1 + shock)
+        stressed_forecast = pd.Series(
+            arimax_model.predict(
+                start=train_size,
+                end=train_size + len(exog_test) - 1,
+                exog=shocked_exog,
+            ).values,
+            index=baseline_forecast.index,
+        )
+        rows.append(
+            {
+                "Senaryo": scenario,
+                "Karbon Şoku": f"+%{int(shock * 100)}",
+                "Baz Tahmin Ortalaması": float(baseline_forecast.mean()),
+                "Stres Tahmin Ortalaması": float(stressed_forecast.mean()),
+                "Ortalama Etki (%)": float((stressed_forecast.mean() / baseline_forecast.mean() - 1.0) * 100.0),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(7, 5))
     sns.heatmap(
@@ -466,7 +552,7 @@ def write_thesis_report(
             "-" * 80,
             arimax_summary,
             "",
-            "TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR, MA ve X2 / Demir Cevheri)",
+            "TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR, MA ve Exogenous: Karbon + Demir + Kur)",
             "-" * 80,
             arimax_coef_table_str,
             "",
@@ -478,7 +564,7 @@ def write_thesis_report(
             "-" * 80,
             metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
             "",
-            "6) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
+            "6) STRES TESTİ SONUÇ TABLOSU (Karbon Şoku Exogenous Üzerinden ARIMAX Re-Forecast)",
             "-" * 80,
             stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
             "",
@@ -492,40 +578,50 @@ def write_thesis_report(
 def run_pipeline(interval: str = "1d") -> PipelineResult:
     print("=== Modül 1: Veri Çekme ve Ön İşleme ===")
     df_raw = fetch_yfinance_data(interval=interval)
+    df_raw_usd = convert_target_to_usd(df_raw)
+    model_input_raw = df_raw_usd[[TARGET_USD_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]].copy()
 
     print("\n--- Temel İstatistikler (Ham Veri) ---")
-    basic_stats = df_raw.describe()
+    basic_stats = model_input_raw.describe()
     print(basic_stats.to_string(float_format=lambda x: f"{x:.4f}"))
 
     print("\n--- Korelasyon Matrisi (Ham Veri) ---")
-    corr_matrix = df_raw.corr()
+    corr_matrix = model_input_raw.corr()
     print(corr_matrix.to_string(float_format=lambda x: f"{x:.6f}"))
 
     plot_correlation_heatmap(corr_matrix)
 
-    df_scaled, _ = clean_and_scale_data(df_raw)
-    df_stationary, adf_results = enforce_stationarity(df_scaled)
+    df_returns = compute_log_returns(model_input_raw)
+    train_returns, test_returns = train_test_split_time_series(df_returns)
+    train_stationary, test_stationary, adf_results = apply_stationarity_policy_train_test(train_returns, test_returns)
+
+    combined_stationary = pd.concat([train_stationary, test_stationary]).sort_index()
+    combined_scaled, _ = clean_and_scale_data(combined_stationary, fit_df=train_stationary)
+    train_df = combined_scaled.loc[train_stationary.index]
+    test_df = combined_scaled.loc[test_stationary.index]
 
     print("\n--- Betimsel İstatistikler (Birinci Farkı Alınmış Seriler) ---")
-    diff_stats = df_stationary.describe().T[["mean", "std", "min", "max"]]
-    diff_stats["skewness"] = df_stationary.skew()
+    diff_stats = combined_stationary.describe().T[["mean", "std", "min", "max"]]
+    diff_stats["skewness"] = combined_stationary.skew()
     diff_stats.columns = ["Ortalama (Mean)", "Standart Sapma (Std)", "Min", "Max", "Çarpıklık (Skewness)"]
     print(diff_stats.to_string(float_format=lambda x: f"{x:.6f}"))
 
-    train_df, test_df = train_test_split_time_series(df_stationary)
-
-    y_train = train_df[TARGET_TICKER]
+    y_train = train_df[TARGET_USD_TICKER]
     x1_train = train_df[CARBON_TICKER]
     x2_train = train_df[IRON_TICKER]
-    y_test = test_df[TARGET_TICKER]
+    fx_train = train_df[FX_TICKER]
+    y_test = test_df[TARGET_USD_TICKER]
     x1_test = test_df[CARBON_TICKER]
     x2_test = test_df[IRON_TICKER]
+    fx_test = test_df[FX_TICKER]
+    arimax_exog_train = pd.DataFrame({CARBON_TICKER: x1_train, IRON_TICKER: x2_train, FX_TICKER: fx_train})
+    arimax_exog_test = pd.DataFrame({CARBON_TICKER: x1_test, IRON_TICKER: x2_test, FX_TICKER: fx_test})
 
     print("\n=== Modül 2: ARIMAX Eğitimi ve Benchmark'lar ===")
-    arimax_model = fit_sarimax(y_train, exog=x2_train)
+    arimax_model = fit_sarimax(y_train, exog=arimax_exog_train)
     arimax_coef_table_str = str(arimax_model.summary().tables[1])
     arimax_test_pred = pd.Series(
-        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_test) - 1, exog=x2_test).values,
+        arimax_model.predict(start=len(y_train), end=len(y_train) + len(y_test) - 1, exog=arimax_exog_test).values,
         index=y_test.index,
         name="ARIMAX",
     )
@@ -533,8 +629,8 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     residuals_train = pd.Series(arimax_model.resid, index=y_train.index)
 
     baseline_model = LinearRegression()
-    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER]]
-    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER]]
+    X_train_bench = train_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    X_test_bench = test_df[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
     baseline_model.fit(X_train_bench, y_train)
     baseline_pred = pd.Series(baseline_model.predict(X_test_bench), index=y_test.index, name="Baseline")
 
@@ -543,7 +639,8 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
 
     print("\nLSTM benchmark eğitiliyor...")
     lstm_model, lstm_window = train_lstm_model(y_train)
-    lstm_preds = forecast_lstm(lstm_model, df_stationary[TARGET_TICKER].values, len(y_train), lstm_window)
+    lstm_input_series = pd.concat([train_df[TARGET_USD_TICKER], test_df[TARGET_USD_TICKER]]).values
+    lstm_preds = forecast_lstm(lstm_model, lstm_input_series, len(y_train), lstm_window)
     lstm_pred = pd.Series(lstm_preds, index=y_test.index[: len(lstm_preds)], name="LSTM")
 
     print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
@@ -589,10 +686,12 @@ def run_pipeline(interval: str = "1d") -> PipelineResult:
     plot_module_visualizations(y_test=y_test, predictions_df=predictions_df, metrics_df=metrics_df, residuals_df=residuals_df)
 
     print("\n=== Modül 5: Karbon Stres Testi ===")
-    # ÇÖZÜM: 0.000 Hatasını önlemek ve gerçekçi sonuç vermek için ham TL fiyatı kullanıldı.
-    real_base_price = float(df_raw[TARGET_TICKER].iloc[-1])
-    stress_table_df = run_stress_test(base_price=real_base_price)
-    plot_stress_test_fan_chart(last_test_date=y_test.index[-1], base_price=real_base_price)
+    stress_table_df = run_carbon_stress_test(
+        arimax_model=arimax_model,
+        exog_test=arimax_exog_test,
+        baseline_forecast=arimax_test_pred,
+        train_size=len(y_train),
+    )
     print(stress_table_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
 
     write_thesis_report(
