@@ -3,122 +3,95 @@ TEZ BULGULARI RAPORU
 
 TABLO 4.1: BETİMSEL İSTATİSTİKLER (BİRİNCİ FARKI ALINMIŞ VE TEMİZLENMİŞ SERİLER)
 --------------------------------------------------------------------------------
-          Ortalama (Mean)  Standart Sapma (Std)      Min      Max  Çarpıklık (Skewness)
-EREGL.IS         0.485118              0.090969 0.000000 1.000000              0.200970
-KEUA             0.796847              0.038651 0.000000 1.000000             -8.598867
-TIO=F            0.530092              0.053329 0.000000 1.000000             -1.998846
-USDTRY=X         0.645540              0.032464 0.000000 1.000000             -4.908611
+          Ortalama (Mean)  Standart Sapma (Std)       Min      Max  Çarpıklık (Skewness)
+Ticker                                                                                  
+EREGL.IS         0.001108              0.024777 -0.105125 0.147878              0.205679
+KEUA            -0.000899              0.032475 -0.670432 0.169796             -8.598867
+TIO=F           -0.000321              0.016773 -0.167047 0.147475             -1.998846
 
 ================================================================================
 
 1) TEMEL İSTATİSTİKLER VE KORELASYON ANALİZİ (HAM VERİ)
 --------------------------------------------------------------------------------
 1a) Temel İstatistikler (Ham Kapanış Fiyatları):
-       EREGL.IS      KEUA     TIO=F  USDTRY=X
-count 1322.0000 1322.0000 1322.0000 1322.0000
-mean     0.8271   32.1584  119.3995   26.3670
-std      0.1874   15.0844   27.4924   11.4583
-min      0.5495   17.9400   80.0300    8.0288
-25%      0.6799   23.3812  103.1175   17.3373
-50%      0.7678   27.8321  108.4650   27.7236
-75%      0.9967   32.5387  126.9775   35.5306
-max      1.3288   75.0000  219.7700   44.9758
+Ticker  EREGL.IS      KEUA     TIO=F
+count  1322.0000 1322.0000 1322.0000
+mean     19.9660   32.1584  119.3995
+std       6.0035   15.0844   27.4924
+min       7.5750   17.9400   80.0300
+25%      15.4650   23.3812  103.1175
+50%      20.9500   27.8321  108.4650
+75%      24.3950   32.5387  126.9775
+max      33.7200   75.0000  219.7700
 
 1b) Korelasyon Matrisi (Ham Kapanış Fiyatları):
-          EREGL.IS      KEUA     TIO=F  USDTRY=X
-EREGL.IS  1.000000  0.599306  0.615683 -0.858913
-KEUA      0.599306  1.000000  0.779945 -0.678838
-TIO=F     0.615683  0.779945  1.000000 -0.606567
-USDTRY=X -0.858913 -0.678838 -0.606567  1.000000
+Ticker    EREGL.IS      KEUA     TIO=F
+Ticker                                
+EREGL.IS  1.000000 -0.729421 -0.596301
+KEUA     -0.729421  1.000000  0.779945
+TIO=F    -0.596301  0.779945  1.000000
 
-2) ADF TEST SONUÇLARI (YALNIZCA EĞİTİM BÖLÜMÜ REFERANSLI)
+2) ADF TEST SONUÇLARI
 --------------------------------------------------------------------------------
 EREGL.IS: initial_p=0.000000, differenced=False, final_p=0.000000
 KEUA: initial_p=0.000000, differenced=False, final_p=0.000000
 TIO=F: initial_p=0.000000, differenced=False, final_p=0.000000
-USDTRY=X: initial_p=0.000000, differenced=False, final_p=0.000000
 
 3) ARIMAX MODEL ÖZETİ
 --------------------------------------------------------------------------------
                                SARIMAX Results                                
 ==============================================================================
 Dep. Variable:               EREGL.IS   No. Observations:                  924
-Model:               SARIMAX(3, 1, 1)   Log Likelihood                 906.860
-Date:                Tue, 12 May 2026   AIC                          -1797.721
-Time:                        18:53:20   BIC                          -1759.126
-Sample:                    04-02-2021   HQIC                         -1782.993
+Model:                        SARIMAX   Log Likelihood                 783.132
+Date:                Fri, 15 May 2026   AIC                          -1560.264
+Time:                        20:38:56   BIC                          -1545.781
+Sample:                    04-02-2021   HQIC                         -1554.738
                          - 10-16-2024                                         
 Covariance Type:                  opg                                         
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
-KEUA           0.0298      0.052      0.574      0.566      -0.072       0.131
-TIO=F          0.1152      0.058      1.986      0.047       0.002       0.229
-USDTRY=X      -0.9056      0.042    -21.505      0.000      -0.988      -0.823
-ar.L1         -0.0210      0.026     -0.797      0.425      -0.073       0.031
-ar.L2          0.0012      0.029      0.039      0.969      -0.057       0.059
-ar.L3         -0.0207      0.025     -0.816      0.415      -0.070       0.029
-ma.L1         -1.0000      1.964     -0.509      0.611      -4.849       2.849
-sigma2         0.0081      0.016      0.510      0.610      -0.023       0.039
+KEUA           0.3685      0.024     15.522      0.000       0.322       0.415
+TIO=F          0.2386      0.035      6.858      0.000       0.170       0.307
+sigma2         0.0107      0.000     31.993      0.000       0.010       0.011
 ===================================================================================
-Ljung-Box (L1) (Q):                   0.00   Jarque-Bera (JB):               337.42
-Prob(Q):                              0.98   Prob(JB):                         0.00
-Heteroskedasticity (H):               0.82   Skew:                             0.45
-Prob(H) (two-sided):                  0.08   Kurtosis:                         5.83
+Ljung-Box (L1) (Q):                   0.02   Jarque-Bera (JB):               308.62
+Prob(Q):                              0.89   Prob(JB):                         0.00
+Heteroskedasticity (H):               0.77   Skew:                             0.42
+Prob(H) (two-sided):                  0.02   Kurtosis:                         5.70
 ===================================================================================
 
 Warnings:
 [1] Covariance matrix calculated using the outer product of gradients (complex-step).
 
-Selected exog: x1_x2_x3
-
-TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR/MA/d ve exog aday seçimi)
+TABLO 4.2: ARIMAX KATSAYI TABLOSU (AR, MA ve Exogenous: Karbon + Demir + Kur)
 --------------------------------------------------------------------------------
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
-KEUA           0.0298      0.052      0.574      0.566      -0.072       0.131
-TIO=F          0.1152      0.058      1.986      0.047       0.002       0.229
-USDTRY=X      -0.9056      0.042    -21.505      0.000      -0.988      -0.823
-ar.L1         -0.0210      0.026     -0.797      0.425      -0.073       0.031
-ar.L2          0.0012      0.029      0.039      0.969      -0.057       0.059
-ar.L3         -0.0207      0.025     -0.816      0.415      -0.070       0.029
-ma.L1         -1.0000      1.964     -0.509      0.611      -4.849       2.849
-sigma2         0.0081      0.016      0.510      0.610      -0.023       0.039
+KEUA           0.3685      0.024     15.522      0.000       0.322       0.415
+TIO=F          0.2386      0.035      6.858      0.000       0.170       0.307
+sigma2         0.0107      0.000     31.993      0.000       0.010       0.011
 ==============================================================================
 
 4) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM)
 --------------------------------------------------------------------------------
               Test  p-değeri
-Ljung-Box (lag=10)  0.127091
-           ARCH-LM  0.413991
+Ljung-Box (lag=10)  0.161610
+           ARCH-LM  0.358918
 
 5) TEST KÜMESİ PERFORMANS METRİKLERİ (RMSE / MAE)
 --------------------------------------------------------------------------------
             Model     RMSE      MAE
-         Baseline 0.078141 0.056985
-           ARIMAX 0.078143 0.056987
-Hibrit ARIMAX-MLP 0.078169 0.057339
-          XGBoost 0.080027 0.058598
+         Baseline 0.088580 0.064692
+             LSTM 0.088614 0.064756
+Hibrit ARIMAX-MLP 0.088753 0.064430
+           ARIMAX 0.088836 0.065200
+          XGBoost 0.092522 0.070275
 
-6) ROLLING BACKTEST ÖZETİ (RMSE ortalama / std / kazanılan pencere)
+6) STRES TESTİ SONUÇ TABLOSU (Karbon Şoku Exogenous Üzerinden ARIMAX Re-Forecast)
 --------------------------------------------------------------------------------
-            Model  RMSE_mean  RMSE_std  wins
-          XGBoost   0.073585  0.007245     2
-           ARIMAX   0.073602  0.007015     0
-Hibrit ARIMAX-MLP   0.073659  0.007694     1
-         Baseline   0.073696  0.006950     0
-
-7) BAŞARI KRİTERİ KONTROLÜ (AÇIK ARA BİRİNCİLİK)
---------------------------------------------------------------------------------
-Tek split iyileşme oranı: -0.0366%
-Rolling pencere kazanma oranı: 33.3333%
-Rolling ortalama iyileşme: -0.5052%
-Sonuç: FAIL
-
-8) STRES TESTİ SONUÇ TABLOSU (GERÇEK USD FİYATI ÜZERİNDEN)
---------------------------------------------------------------------------------
-   Senaryo Şok Oranı  Alt Bant Fiyatı  Baz Senaryo Fiyatı  Üst Bant Fiyatı
- S1 (+%30)      +%30             0.51                0.73             0.95
- S2 (+%60)      +%60             0.29                0.73             1.17
-S3 (+%100)     +%100             0.00                0.73             1.47
+   Senaryo Karbon Şoku  Baz Tahmin Ortalaması  Stres Tahmin Ortalaması  Ortalama Etki (%)
+ S1 (+%30)        +%30                   0.42                     0.51              20.95
+ S2 (+%60)        +%60                   0.42                     0.60              41.89
+S3 (+%100)       +%100                   0.42                     0.71              69.82

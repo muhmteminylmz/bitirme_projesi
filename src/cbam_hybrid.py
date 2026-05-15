@@ -916,10 +916,27 @@ def run_pipeline(interval: str = "1d", config: RecoveryConfig | None = None) -> 
     xgb_pred = pd.Series(xgb_model.predict(X_test_bench), index=y_test.index, name="XGBoost")
 
     print("\nLSTM benchmark eğitiliyor...")
-    lstm_model, lstm_window = train_lstm_model(y_train)
-    lstm_input_series = pd.concat([train_df[TARGET_USD_TICKER], test_df[TARGET_USD_TICKER]]).values
-    lstm_preds = forecast_lstm(lstm_model, lstm_input_series, len(y_train), lstm_window)
-    lstm_pred = pd.Series(lstm_preds, index=y_test.index[: len(lstm_preds)], name="LSTM")
+
+    lstm_train_series = train_df[target_col]
+
+    lstm_model, lstm_window = train_lstm_model(lstm_train_series)
+
+    lstm_input_series = pd.concat(
+    [train_df[target_col], test_df[target_col]]
+    ).values
+
+    lstm_preds = forecast_lstm(
+    lstm_model,
+    lstm_input_series,
+    len(y_train),
+    lstm_window,
+    )
+
+    lstm_pred = pd.Series(
+    lstm_preds,
+    index=y_test.index[: len(lstm_preds)],
+    name="LSTM",
+    )
 
     print("\n=== Modül 3: MLP Eğitim ve Hibrit Birleştirme ===")
     X_mlp_train, y_mlp_train = build_residual_training_frame(x1_train, residuals_train, feature_mode="legacy")
