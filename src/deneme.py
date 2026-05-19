@@ -4,8 +4,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from pathlib import Path
-from math import erf, sqrt
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +14,6 @@ import tensorflow as tf
 import yfinance as yf
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.stattools import adfuller
@@ -183,322 +181,7 @@ def plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_res
     plt.savefig("Grafik_3_Residual_KDE.png")
     plt.close()
 
-def _normal_cdf(x: float) -> float:
-    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
-
-
-def diebold_mariano_test(
-    y_true: pd.Series,
-    pred_model_a: pd.Series,
-    pred_model_b: pd.Series,
-    loss_power: int = 2,
-) -> Tuple[float, float, str]:
-    """One-step-ahead Diebold-Mariano testi (h=1) döndürür: (DM istatistiği, p-value, yorum)."""
-    idx = y_true.index.intersection(pred_model_a.index).intersection(pred_model_b.index)
-    y = y_true.loc[idx]
-    e1 = (y - pred_model_a.loc[idx]).astype(float)
-    e2 = (y - pred_model_b.loc[idx]).astype(float)
-
-    loss_diff = np.abs(e1) ** loss_power - np.abs(e2) ** loss_power
-    n = len(loss_diff)
-    if n < 2:
-        return np.nan, np.nan, "Yetersiz gözlem"
-
-    d_bar = float(loss_diff.mean())
-    d_var = float(loss_diff.var(ddof=1))
-    if np.isclose(d_var, 0.0):
-        return np.nan, 1.0, "Anlamlı fark yok (varyans≈0)"
-
-    dm_stat = d_bar / np.sqrt(d_var / n)
-    p_value = 2.0 * (1.0 - _normal_cdf(abs(dm_stat)))
-    interpretation = "istatistiksel olarak anlamlı" if p_value < 0.05 else "istatistiksel olarak anlamsız"
-    return float(dm_stat), float(p_value), interpretation
-
-
-def run_dm_tests(
-    y_true: pd.Series,
-    predictions_df: pd.DataFrame,
-    hybrid_model_name: str = "Hibrit ARIMAX-MLP",
-) -> pd.DataFrame:
-    """Hibrit modelin diğer tüm modellere karşı DM test sonuçlarını tablo halinde döndürür."""
-    rows = []
-    for model_name in predictions_df.columns:
-        if model_name == hybrid_model_name:
-            continue
-        dm_stat, p_value, interpretation = diebold_mariano_test(
-            y_true=y_true,
-            pred_model_a=predictions_df[hybrid_model_name],
-            pred_model_b=predictions_df[model_name],
-        )
-        rows.append(
-            {
-                "Karşılaştırma": f"{hybrid_model_name} vs {model_name}",
-                "DM İstatistiği": dm_stat,
-                "p-value": p_value,
-                "Yorum": interpretation,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def split_fold_train_val(train_val_df: pd.DataFrame, val_ratio: float = 0.2, min_val_size: int = 20):
-    """Walk-forward fold içindeki train kısmını leakage-safe train/val olarak ayırır."""
-    if len(train_val_df) < (min_val_size * 2):
-        split_idx = max(int(len(train_val_df) * (1 - val_ratio)), 1)
-    else:
-        split_idx = len(train_val_df) - min_val_size
-    split_idx = min(max(split_idx, 1), len(train_val_df) - 1)
-    return train_val_df.iloc[:split_idx].copy(), train_val_df.iloc[split_idx:].copy()
-
-
-def train_and_predict_all_models(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    return_arimax_details: bool = False,
-):
-    """Tek split için tüm benchmark + hibrit modeli yeniden eğitir ve test tahminlerini döndürür."""
-    y_train = train_df[TARGET_TICKER]
-    y_val = val_df[TARGET_TICKER]
-    y_test = test_df[TARGET_TICKER]
-
-    exog_cols = [CARBON_TICKER, IRON_TICKER, FX_TICKER]
-    exog_train = train_df[exog_cols]
-    exog_val = val_df[exog_cols]
-    exog_test = test_df[exog_cols]
-
-    # Baseline (OLS)
-    baseline = LinearRegression().fit(exog_train, y_train)
-    pred_base_test = pd.Series(baseline.predict(exog_test), index=test_df.index, name="Baseline (OLS)")
-
-    # XGBoost
-    xgb = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
-    xgb.fit(exog_train, y_train)
-    pred_xgb_test = pd.Series(xgb.predict(exog_test), index=test_df.index, name="XGBoost")
-
-    # LSTM
-    pred_lstm_test = run_lstm_benchmark(y_train, y_val, y_test)
-    pred_lstm_test.name = "LSTM"
-
-    # ARIMAX
-    arimax_model = SARIMAX(y_train.values, exog=exog_train.values, order=(1, 0, 1)).fit(maxiter=1000, disp=False)
-    arimax_summary = str(arimax_model.summary())
-    arimax_coef = str(arimax_model.summary().tables[1])
-
-    fold_all = pd.concat([train_df, val_df, test_df]).sort_index()
-    y_all = fold_all[TARGET_TICKER]
-    exog_all = fold_all[exog_cols]
-
-    pred_in = arimax_model.predict(start=0, end=len(y_train) - 1)
-    exog_oos = exog_all.iloc[len(y_train):].values
-    pred_oos = arimax_model.predict(start=len(y_train), end=len(y_all) - 1, exog=exog_oos)
-    pred_arimax_all = pd.Series(np.concatenate([pred_in, pred_oos]), index=y_all.index)
-    pred_arimax_test = pd.Series(pred_arimax_all.loc[test_df.index].values, index=test_df.index, name="ARIMAX")
-
-    # Hibrit MLP residual modeli (yalnızca geçmiş bilgi ile)
-    true_residuals = y_all - pred_arimax_all
-    mlp_features = pd.DataFrame(index=y_all.index)
-    mlp_features["X1_t"] = exog_all[CARBON_TICKER]
-    mlp_features["X1_t_minus_1"] = exog_all[CARBON_TICKER].shift(1)
-    mlp_features["X3_t"] = exog_all[FX_TICKER]
-    mlp_features["X3_t_minus_1"] = exog_all[FX_TICKER].shift(1)
-    mlp_features["e_t_minus_1"] = true_residuals.shift(1)
-    mlp_features["e_t_minus_2"] = true_residuals.shift(2)
-    mlp_df = pd.concat([mlp_features, true_residuals.rename("Target_Residual")], axis=1).dropna()
-
-    mlp_train = mlp_df.loc[mlp_df.index.isin(train_df.index)]
-    mlp_val = mlp_df.loc[mlp_df.index.isin(val_df.index)]
-    mlp_test = mlp_df.loc[mlp_df.index.isin(test_df.index)]
-
-    X_mlp_train, y_mlp_train = mlp_train.drop(columns="Target_Residual"), mlp_train["Target_Residual"]
-    X_mlp_val, y_mlp_val = mlp_val.drop(columns="Target_Residual"), mlp_val["Target_Residual"]
-    X_mlp_test = mlp_test.drop(columns="Target_Residual")
-
-    scaler_X = MinMaxScaler()
-    X_mlp_train_sc = scaler_X.fit_transform(X_mlp_train)
-    X_mlp_val_sc = scaler_X.transform(X_mlp_val)
-    X_mlp_test_sc = scaler_X.transform(X_mlp_test)
-
-    tf.keras.utils.set_random_seed(7)
-    model_mlp = tf.keras.Sequential(
-        [
-            tf.keras.layers.Input(shape=(X_mlp_train_sc.shape[1],)),
-            tf.keras.layers.Dense(64, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(32, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(16, activation="relu"),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(1, activation="linear"),
-        ]
-    )
-    model_mlp.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.01), loss=tf.keras.losses.Huber(delta=0.05))
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
-    model_mlp.fit(
-        X_mlp_train_sc,
-        y_mlp_train.values,
-        validation_data=(X_mlp_val_sc, y_mlp_val.values),
-        epochs=200,
-        batch_size=8,
-        callbacks=[early_stopping],
-        verbose=0,
-    )
-
-    mlp_pred_resid = pd.Series(model_mlp.predict(X_mlp_test_sc, verbose=0).ravel(), index=mlp_test.index)
-    pred_hybrid_test = pred_arimax_test.loc[mlp_test.index] + mlp_pred_resid
-    pred_hybrid_test.name = "Hibrit ARIMAX-MLP"
-
-    idx = pred_hybrid_test.index
-    y_test_final = y_test.loc[idx]
-    predictions_df = pd.DataFrame(
-        {
-            pred_base_test.name: pred_base_test.loc[idx],
-            pred_xgb_test.name: pred_xgb_test.loc[idx],
-            pred_lstm_test.name: pred_lstm_test.loc[idx],
-            pred_arimax_test.name: pred_arimax_test.loc[idx],
-            pred_hybrid_test.name: pred_hybrid_test,
-        }
-    )
-    artifacts = {
-        "y_test_final": y_test_final,
-        "predictions_df": predictions_df,
-        "hybrid_resid": y_test_final - pred_hybrid_test,
-        "xgb_resid": y_test_final - predictions_df["XGBoost"],
-    }
-    if return_arimax_details:
-        artifacts["arimax_summary"] = arimax_summary
-        artifacts["arimax_coef"] = arimax_coef
-    return artifacts
-
-
-def walk_forward_cross_validation(df_returns: pd.DataFrame, n_splits: int = 5) -> pd.DataFrame:
-    """TimeSeriesSplit ile walk-forward CV: her fold'da tüm modelleri yeniden eğitir."""
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    model_order = ["Baseline (OLS)", "XGBoost", "LSTM", "ARIMAX", "Hibrit ARIMAX-MLP"]
-    fold_rows: List[Dict[str, float]] = []
-
-    for fold_id, (train_val_idx, test_idx) in enumerate(tscv.split(df_returns), start=1):
-        fold_train_val = df_returns.iloc[train_val_idx].copy()
-        fold_test = df_returns.iloc[test_idx].copy()
-        fold_train, fold_val = split_fold_train_val(fold_train_val, val_ratio=0.2, min_val_size=max(10, len(fold_test)))
-
-        fold_artifacts = train_and_predict_all_models(fold_train, fold_val, fold_test)
-        y_fold = fold_artifacts["y_test_final"]
-        pred_fold = fold_artifacts["predictions_df"]
-
-        row: Dict[str, float] = {"Fold": fold_id}
-        for model_name in model_order:
-            row[model_name] = float(np.sqrt(mean_squared_error(y_fold, pred_fold[model_name])))
-        fold_rows.append(row)
-
-    fold_rmse_df = pd.DataFrame(fold_rows)
-    return fold_rmse_df
-
-
-def summarize_walk_forward_rmse(fold_rmse_df: pd.DataFrame) -> pd.DataFrame:
-    """Fold RMSE sonuçlarından akademik özet tablo üretir (ortalama ± std)."""
-    model_cols = [c for c in fold_rmse_df.columns if c != "Fold"]
-    rows = []
-    for model_name in model_cols:
-        rows.append(
-            {
-                "Model": model_name,
-                "RMSE Mean": float(fold_rmse_df[model_name].mean()),
-                "RMSE Std": float(fold_rmse_df[model_name].std(ddof=1)),
-            }
-        )
-    return pd.DataFrame(rows).sort_values(by="RMSE Mean").reset_index(drop=True)
-
-
-def bootstrap_rmse_confidence_interval(
-    y_true: pd.Series,
-    y_pred: pd.Series,
-    n_bootstrap: int = 1000,
-    confidence_level: float = 0.95,
-    random_state: int = 42,
-):
-    """Hibrit RMSE için bootstrap %95 güven aralığı hesaplar."""
-    idx = y_true.index.intersection(y_pred.index)
-    y = y_true.loc[idx].values
-    p = y_pred.loc[idx].values
-    n = len(y)
-    rng = np.random.default_rng(seed=random_state)
-
-    rmse_samples = np.empty(n_bootstrap, dtype=float)
-    for i in range(n_bootstrap):
-        sample_idx = rng.integers(0, n, size=n)
-        rmse_samples[i] = float(np.sqrt(mean_squared_error(y[sample_idx], p[sample_idx])))
-
-    alpha = 1.0 - confidence_level
-    low = float(np.quantile(rmse_samples, alpha / 2.0))
-    high = float(np.quantile(rmse_samples, 1.0 - alpha / 2.0))
-    point_rmse = float(np.sqrt(mean_squared_error(y, p)))
-    return point_rmse, low, high, rmse_samples
-
-
-def plot_fold_rmse_comparison(fold_rmse_df: pd.DataFrame):
-    plt.figure(figsize=(12, 6))
-    model_cols = [c for c in fold_rmse_df.columns if c != "Fold"]
-    for model_name in model_cols:
-        plt.plot(
-            fold_rmse_df["Fold"],
-            fold_rmse_df[model_name],
-            marker="o",
-            linewidth=1.8,
-            label=model_name,
-            color=MODEL_COLORS.get(model_name, None),
-        )
-    plt.title("Walk-Forward CV Fold Bazlı RMSE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
-    plt.xlabel("Fold")
-    plt.ylabel("RMSE")
-    plt.legend(loc="best")
-    plt.tight_layout()
-    plt.savefig("Grafik_5_Fold_Bazli_RMSE.png")
-    plt.close()
-
-
-def plot_bootstrap_rmse_histogram(rmse_samples: np.ndarray):
-    plt.figure(figsize=(10, 6))
-    sns.histplot(rmse_samples, bins=30, kde=True, color="#8b0000")
-    plt.title("Bootstrap RMSE Dağılımı (Hibrit ARIMAX-MLP)", pad=15, fontsize=12, fontweight="bold")
-    plt.xlabel("RMSE")
-    plt.ylabel("Frekans")
-    plt.tight_layout()
-    plt.savefig("Grafik_6_Bootstrap_RMSE_Histogram.png")
-    plt.close()
-
-
-def plot_dm_pvalue_bar(dm_df: pd.DataFrame):
-    if dm_df.empty:
-        return
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=dm_df, x="Karşılaştırma", y="p-value", palette="viridis")
-    plt.axhline(0.05, color="red", linestyle="--", linewidth=1.5, label="p = 0.05")
-    plt.title("Diebold-Mariano Testi p-value Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
-    plt.ylabel("p-value")
-    plt.xlabel("Model Karşılaştırması")
-    plt.xticks(rotation=15)
-    plt.legend(loc="upper right")
-    plt.tight_layout()
-    plt.savefig("Grafik_7_DM_pvalue_Bar.png")
-    plt.close()
-
-
-def write_thesis_report(
-    raw_stats,
-    raw_corr,
-    ret_stats,
-    adf_res,
-    arimax_summary,
-    arimax_coef,
-    diag_df,
-    metrics_df,
-    stress_df,
-    dm_results_df: Optional[pd.DataFrame] = None,
-    fold_rmse_df: Optional[pd.DataFrame] = None,
-    cv_summary_df: Optional[pd.DataFrame] = None,
-    bootstrap_text: Optional[str] = None,
-):
+def write_thesis_report(raw_stats, raw_corr, ret_stats, adf_res, arimax_summary, arimax_coef, diag_df, metrics_df, stress_df):
     lines = [
         "TEZ BULGULARI RAPORU", "=" * 80, "",
         "TABLO 4.1: BETİMSEL İSTATİSTİKLER (LOG GETİRİ)", "-" * 80,
@@ -521,61 +204,6 @@ def write_thesis_report(
         "6) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)", "-" * 80,
         stress_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"), ""
     ])
-
-    if dm_results_df is not None and not dm_results_df.empty:
-        lines.extend(
-            [
-                "=" * 80,
-                "7) DIEBOLD-MARIANO TEST SONUÇLARI (HİBRİT vs DİĞER MODELLER)",
-                "-" * 80,
-                dm_results_df.to_string(index=False, float_format=lambda x: f"{x:.6f}" if pd.notna(x) else "NaN"),
-                "",
-                "Akademik Yorum: p < 0.05 olan karşılaştırmalarda hibrit model ile rakip model tahmin hataları arasında istatistiksel olarak anlamlı fark vardır.",
-                "",
-            ]
-        )
-
-    if fold_rmse_df is not None and not fold_rmse_df.empty:
-        lines.extend(
-            [
-                "=" * 80,
-                "8) WALK-FORWARD CROSS-VALIDATION (TimeSeriesSplit, 5 split)",
-                "-" * 80,
-                "Fold Bazlı RMSE Tablosu:",
-                fold_rmse_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
-                "",
-            ]
-        )
-
-    if cv_summary_df is not None and not cv_summary_df.empty:
-        lines.extend(
-            [
-                "Ortalama RMSE ± Std Özeti:",
-                cv_summary_df.assign(
-                    **{
-                        "RMSE Mean ± Std": cv_summary_df.apply(
-                            lambda r: f"{r['RMSE Mean']:.6f} ± {r['RMSE Std']:.6f}", axis=1
-                        )
-                    }
-                )[["Model", "RMSE Mean ± Std"]].to_string(index=False),
-                "",
-                "Akademik Yorum: Ortalama RMSE ve standart sapma birlikte değerlendirilerek hem doğruluk hem de kararlılık raporlanmıştır.",
-                "",
-            ]
-        )
-
-    if bootstrap_text is not None:
-        lines.extend(
-            [
-                "=" * 80,
-                "9) BOOTSTRAP CONFIDENCE INTERVAL (HİBRİT RMSE, 1000 ÖRNEKLEME)",
-                "-" * 80,
-                bootstrap_text,
-                "",
-                "Akademik Yorum: Bootstrap güven aralığı tahmin performansının örnekleme belirsizliğine duyarlılığını gösterir.",
-                "",
-            ]
-        )
     
     Path("Tez_Bulgulari_Raporu.txt").write_text("\n".join(lines), encoding="utf-8")
     print("\nTez raporu başarıyla oluşturuldu: Tez_Bulgulari_Raporu.txt")
@@ -626,16 +254,97 @@ def run_pipeline():
     adf_res = {col: adfuller(df_returns[col].dropna())[1] for col in df_returns.columns}
     
     train_df, val_df, test_df = strict_data_split(df_returns)
+    y_all = df_returns[TARGET_TICKER]
+    exog_all = df_returns[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    
+    y_train = train_df[TARGET_TICKER]
+    exog_train = train_df[exog_all.columns]
+    
     print("\n=== 2. Benchmark Modeller Eğitiliyor ===")
-    split_artifacts = train_and_predict_all_models(train_df, val_df, test_df, return_arimax_details=True)
-    y_test_final = split_artifacts["y_test_final"]
-    predictions_df = split_artifacts["predictions_df"]
-    hybrid_resid = split_artifacts["hybrid_resid"]
-    xgb_resid = split_artifacts["xgb_resid"]
-    arimax_summary = split_artifacts["arimax_summary"]
-    arimax_coef = split_artifacts["arimax_coef"]
+    baseline = LinearRegression().fit(exog_train, y_train)
+    pred_base_test = pd.Series(baseline.predict(test_df[exog_all.columns]), index=test_df.index, name="Baseline (OLS)")
+    
+    xgb = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
+    xgb.fit(exog_train, y_train)
+    pred_xgb_test = pd.Series(xgb.predict(test_df[exog_all.columns]), index=test_df.index, name="XGBoost")
+    
+    pred_lstm_test = run_lstm_benchmark(y_train, val_df[TARGET_TICKER], test_df[TARGET_TICKER])
+    pred_lstm_test.name = "LSTM"
+    
+    print("ARIMAX(1,0,1) Modeli Eğitiliyor...")
+    arimax_model = SARIMAX(y_train.values, exog=exog_train.values, order=(1,0,1)).fit(maxiter=1000, disp=False)
+    arimax_summary = str(arimax_model.summary())
+    arimax_coef = str(arimax_model.summary().tables[1])
+    
+    pred_in = arimax_model.predict(start=0, end=len(y_train)-1)
+    exog_oos = exog_all.iloc[len(y_train):].values
+    pred_oos = arimax_model.predict(start=len(y_train), end=len(y_all)-1, exog=exog_oos)
+    
+    pred_arimax_all = pd.Series(np.concatenate([pred_in, pred_oos]), index=y_all.index)
+    pred_arimax_test = pd.Series(pred_arimax_all.loc[test_df.index].values, index=test_df.index, name="ARIMAX")
+
+    print("\n=== 3. Hibrit MLP Feature Engineering ===")
+    true_residuals = y_all - pred_arimax_all
+    
+    mlp_features = pd.DataFrame(index=y_all.index)
+    mlp_features['X1_t'] = exog_all[CARBON_TICKER]               
+    mlp_features['X1_t_minus_1'] = exog_all[CARBON_TICKER].shift(1) 
+    mlp_features['X3_t'] = exog_all[FX_TICKER]
+    mlp_features['X3_t_minus_1'] = exog_all[FX_TICKER].shift(1)
+    mlp_features['e_t_minus_1'] = true_residuals.shift(1)        
+    mlp_features['e_t_minus_2'] = true_residuals.shift(2)        
+    
+    mlp_df = pd.concat([mlp_features, true_residuals.rename('Target_Residual')], axis=1).dropna()
+    
+    mlp_train = mlp_df.loc[mlp_df.index.isin(train_df.index)]
+    mlp_val = mlp_df.loc[mlp_df.index.isin(val_df.index)]
+    mlp_test = mlp_df.loc[mlp_df.index.isin(test_df.index)]
+    
+    X_mlp_train, y_mlp_train = mlp_train.drop(columns='Target_Residual'), mlp_train['Target_Residual']
+    X_mlp_val, y_mlp_val = mlp_val.drop(columns='Target_Residual'), mlp_val['Target_Residual']
+    X_mlp_test = mlp_test.drop(columns='Target_Residual')
+    
+    scaler_X = MinMaxScaler()
+    X_mlp_train_sc = scaler_X.fit_transform(X_mlp_train)
+    X_mlp_val_sc = scaler_X.transform(X_mlp_val)
+    X_mlp_test_sc = scaler_X.transform(X_mlp_test)
+
+    print("\n=== 4. Yapay Sinir Ağı (MLP) Eğitiliyor ===")
+    tf.keras.utils.set_random_seed(7)
+    
+    model_mlp = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(X_mlp_train_sc.shape[1],)),
+        tf.keras.layers.Dense(64, activation="relu"),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(32, activation="relu"),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(16, activation="relu"),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(1, activation="linear"),
+    ])
+    
+    model_mlp.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.01), loss=tf.keras.losses.Huber(delta=0.05))
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
+    
+    model_mlp.fit(X_mlp_train_sc, y_mlp_train.values, validation_data=(X_mlp_val_sc, y_mlp_val.values),
+                  epochs=200, batch_size=8, callbacks=[early_stopping], verbose=0)
+    
+    mlp_pred_resid = pd.Series(model_mlp.predict(X_mlp_test_sc, verbose=0).ravel(), index=mlp_test.index)
+    pred_hybrid_test = pred_arimax_test.loc[mlp_test.index] + mlp_pred_resid
+    pred_hybrid_test.name = "Hibrit ARIMAX-MLP"
 
     print("\n=== 5. Analiz, Raporlama ve Stres Testi ===")
+    idx = pred_hybrid_test.index
+    y_test_final = test_df[TARGET_TICKER].loc[idx]
+    
+    predictions_df = pd.DataFrame({
+        pred_base_test.name: pred_base_test.loc[idx],
+        pred_xgb_test.name: pred_xgb_test.loc[idx],
+        pred_lstm_test.name: pred_lstm_test.loc[idx],
+        pred_arimax_test.name: pred_arimax_test.loc[idx],
+        pred_hybrid_test.name: pred_hybrid_test
+    })
+    
     metrics = []
     for col in predictions_df.columns:
         p = predictions_df[col]
@@ -648,68 +357,22 @@ def run_pipeline():
     print(metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
     # Diagnostik Testler
+    hybrid_resid = y_test_final - pred_hybrid_test
+    xgb_resid = y_test_final - predictions_df["XGBoost"]
+    
     lb_pval = float(acorr_ljungbox(hybrid_resid, lags=[10], return_df=True)["lb_pvalue"].iloc[0])
     arch_pval = float(het_arch(hybrid_resid.dropna())[1])
     diag_df = pd.DataFrame([{"Test": "Ljung-Box (lag=10)", "p-değeri": lb_pval}, {"Test": "ARCH-LM", "p-değeri": arch_pval}])
-
-    # A) Diebold-Mariano Testi: Hibrit vs diğer modeller
-    dm_results_df = run_dm_tests(y_test_final, predictions_df, hybrid_model_name="Hibrit ARIMAX-MLP")
-    print("\nDiebold-Mariano Test Sonuçları:")
-    print(dm_results_df.to_string(index=False, float_format=lambda x: f"{x:.6f}" if pd.notna(x) else "NaN"))
-
-    # B) Walk-Forward Cross Validation (5 split)
-    print("\n=== 6. Walk-Forward Cross Validation (TimeSeriesSplit=5) ===")
-    fold_rmse_df = walk_forward_cross_validation(df_returns, n_splits=5)
-    cv_summary_df = summarize_walk_forward_rmse(fold_rmse_df)
-    print("\nFold Bazlı RMSE Tablosu:")
-    print(fold_rmse_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
-    print("\nAkademik RMSE Özeti (Ortalama ± Std):")
-    cv_display_df = cv_summary_df.copy()
-    cv_display_df["RMSE Mean ± Std"] = cv_display_df.apply(
-        lambda r: f"{r['RMSE Mean']:.6f} ± {r['RMSE Std']:.6f}", axis=1
-    )
-    print(cv_display_df[["Model", "RMSE Mean ± Std"]].to_string(index=False))
-
-    # C) Bootstrap Confidence Interval (%95) - Hibrit RMSE
-    hybrid_name = "Hibrit ARIMAX-MLP"
-    point_rmse, ci_low, ci_high, rmse_samples = bootstrap_rmse_confidence_interval(
-        y_test_final,
-        predictions_df[hybrid_name],
-        n_bootstrap=1000,
-        confidence_level=0.95,
-        random_state=42,
-    )
-    bootstrap_text = f"RMSE = {point_rmse:.6f}\n95% CI = [{ci_low:.6f}, {ci_high:.6f}]"
-    print("\nBootstrap Sonucu:")
-    print(bootstrap_text)
     
     # Stres Testi (Gerçek Fiyat üzerinden)
     real_base_price = float(df_raw[TARGET_TICKER].iloc[-1])
     stress_df = run_stress_test(real_base_price)
     
-    # D) Görseller
+    # Görseller ve Rapor
     plot_stress_test_fan_chart(y_test_final.index[-1], real_base_price)
     plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_resid, xgb_resid)
-    plot_fold_rmse_comparison(fold_rmse_df)
-    plot_bootstrap_rmse_histogram(rmse_samples)
-    plot_dm_pvalue_bar(dm_results_df)
     
-    # E) Tez raporu entegrasyonu
-    write_thesis_report(
-        raw_stats,
-        raw_corr,
-        ret_stats,
-        adf_res,
-        arimax_summary,
-        arimax_coef,
-        diag_df,
-        metrics_df,
-        stress_df,
-        dm_results_df=dm_results_df,
-        fold_rmse_df=fold_rmse_df,
-        cv_summary_df=cv_summary_df,
-        bootstrap_text=bootstrap_text,
-    )
+    write_thesis_report(raw_stats, raw_corr, ret_stats, adf_res, arimax_summary, arimax_coef, diag_df, metrics_df, stress_df)
 
 if __name__ == "__main__":
     run_pipeline()

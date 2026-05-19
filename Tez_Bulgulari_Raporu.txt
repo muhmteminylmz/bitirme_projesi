@@ -47,21 +47,21 @@ USDTRY=X: ADF p-değeri=0.000000 -> DURAĞAN
 Dep. Variable:                      y   No. Observations:                  545
 Model:               SARIMAX(1, 0, 1)   Log Likelihood                1308.542
 Date:                Tue, 19 May 2026   AIC                          -2605.085
-Time:                        17:08:19   BIC                          -2579.280
+Time:                        17:58:57   BIC                          -2579.280
 Sample:                             0   HQIC                         -2594.997
                                 - 545                                         
 Covariance Type:                  opg                                         
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
-x1             0.0404      0.044      0.924      0.355      -0.045       0.126
-x2            -0.0088      0.084     -0.105      0.916      -0.173       0.155
-x3            -0.0858      0.373     -0.230      0.818      -0.817       0.646
-ar.L1         -0.0013      1.073     -0.001      0.999      -2.103       2.101
-ma.L1         -0.0272      1.076     -0.025      0.980      -2.135       2.081
-sigma2         0.0005   1.86e-05     25.841      0.000       0.000       0.001
+x1             0.0405      0.044      0.926      0.354      -0.045       0.126
+x2            -0.0089      0.084     -0.106      0.915      -0.173       0.155
+x3            -0.0875      0.373     -0.234      0.815      -0.819       0.644
+ar.L1         -0.0010      1.065     -0.001      0.999      -2.089       2.087
+ma.L1         -0.0277      1.068     -0.026      0.979      -2.122       2.066
+sigma2         0.0005   1.86e-05     25.843      0.000       0.000       0.001
 ===================================================================================
-Ljung-Box (L1) (Q):                   0.00   Jarque-Bera (JB):               227.65
+Ljung-Box (L1) (Q):                   0.00   Jarque-Bera (JB):               227.61
 Prob(Q):                              0.99   Prob(JB):                         0.00
 Heteroskedasticity (H):               1.19   Skew:                            -0.25
 Prob(H) (two-sided):                  0.24   Kurtosis:                         6.13
@@ -75,24 +75,24 @@ TABLO 4.2: ARIMAX KATSAYI TABLOSU
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
-x1             0.0404      0.044      0.924      0.355      -0.045       0.126
-x2            -0.0088      0.084     -0.105      0.916      -0.173       0.155
-x3            -0.0858      0.373     -0.230      0.818      -0.817       0.646
-ar.L1         -0.0013      1.073     -0.001      0.999      -2.103       2.101
-ma.L1         -0.0272      1.076     -0.025      0.980      -2.135       2.081
-sigma2         0.0005   1.86e-05     25.841      0.000       0.000       0.001
+x1             0.0405      0.044      0.926      0.354      -0.045       0.126
+x2            -0.0089      0.084     -0.106      0.915      -0.173       0.155
+x3            -0.0875      0.373     -0.234      0.815      -0.819       0.644
+ar.L1         -0.0010      1.065     -0.001      0.999      -2.089       2.087
+ma.L1         -0.0277      1.068     -0.026      0.979      -2.122       2.066
+sigma2         0.0005   1.86e-05     25.843      0.000       0.000       0.001
 ==============================================================================
 
 4) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM - HİBRİT MODEL)
 --------------------------------------------------------------------------------
               Test  p-değeri
-Ljung-Box (lag=10)  0.971386
-           ARCH-LM  0.831915
+Ljung-Box (lag=10)  0.971394
+           ARCH-LM  0.813788
 
 5) TEST KÜMESİ PERFORMANS METRİKLERİ (RMSE / MAE)
 --------------------------------------------------------------------------------
             Model     RMSE      MAE
-Hibrit ARIMAX-MLP 0.025769 0.021317
+Hibrit ARIMAX-MLP 0.025834 0.021362
    Baseline (OLS) 0.025913 0.021412
           XGBoost 0.025970 0.021217
              LSTM 0.025979 0.021422
@@ -104,3 +104,43 @@ Hibrit ARIMAX-MLP 0.025769 0.021317
  S1 (+%30)      +%30            27.73               39.62            51.51
  S2 (+%60)      +%60            15.85               39.62            63.39
 S3 (+%100)     +%100             0.00               39.62            79.24
+
+================================================================================
+7) DIEBOLD-MARIANO TEST SONUÇLARI (HİBRİT vs DİĞER MODELLER)
+--------------------------------------------------------------------------------
+                      Karşılaştırma  DM İstatistiği  p-value                         Yorum
+Hibrit ARIMAX-MLP vs Baseline (OLS)             NaN 1.000000  Anlamlı fark yok (varyans≈0)
+       Hibrit ARIMAX-MLP vs XGBoost       -0.503197 0.614826 istatistiksel olarak anlamsız
+          Hibrit ARIMAX-MLP vs LSTM             NaN 1.000000  Anlamlı fark yok (varyans≈0)
+        Hibrit ARIMAX-MLP vs ARIMAX             NaN 1.000000  Anlamlı fark yok (varyans≈0)
+
+Akademik Yorum: p < 0.05 olan karşılaştırmalarda hibrit model ile rakip model tahmin hataları arasında istatistiksel olarak anlamlı fark vardır.
+
+================================================================================
+8) WALK-FORWARD CROSS-VALIDATION (TimeSeriesSplit, 5 split)
+--------------------------------------------------------------------------------
+Fold Bazlı RMSE Tablosu:
+ Fold  Baseline (OLS)  XGBoost     LSTM   ARIMAX  Hibrit ARIMAX-MLP
+    1        0.023219 0.023821 0.022102 0.022851           0.022849
+    2        0.016985 0.018763 0.016479 0.016600           0.016613
+    3        0.024725 0.025660 0.024912 0.024741           0.024697
+    4        0.021848 0.022740 0.022296 0.021830           0.022101
+    5        0.022599 0.023243 0.022911 0.022698           0.023118
+
+Ortalama RMSE ± Std Özeti:
+            Model     RMSE Mean ± Std
+             LSTM 0.021740 ± 0.003145
+           ARIMAX 0.021744 ± 0.003065
+   Baseline (OLS) 0.021875 ± 0.002931
+Hibrit ARIMAX-MLP 0.021875 ± 0.003090
+          XGBoost 0.022845 ± 0.002535
+
+Akademik Yorum: Ortalama RMSE ve standart sapma birlikte değerlendirilerek hem doğruluk hem de kararlılık raporlanmıştır.
+
+================================================================================
+9) BOOTSTRAP CONFIDENCE INTERVAL (HİBRİT RMSE, 1000 ÖRNEKLEME)
+--------------------------------------------------------------------------------
+RMSE = 0.025834
+95% CI = [0.021521, 0.030282]
+
+Akademik Yorum: Bootstrap güven aralığı tahmin performansının örnekleme belirsizliğine duyarlılığını gösterir.
