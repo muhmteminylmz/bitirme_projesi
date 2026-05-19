@@ -32,6 +32,7 @@ CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 FX_TICKER = "USDTRY=X"
 ROBUST_TEST_TICKERS = ["AKCNS", "TUPRS", "KRDMD"]
+ROBUST_TEST_MODELS = ["Baseline (OLS)", "XGBoost", "LSTM", "ARIMAX", "Hibrit ARIMAX-MLP"]
 
 MODEL_COLORS = {
     "Baseline (OLS)": "#6c7a89", 
@@ -62,7 +63,7 @@ def fetch_and_clean_data(target_ticker: str = TARGET_TICKER) -> pd.DataFrame:
     return df.reindex(columns=tickers).ffill().bfill().dropna()
 
 
-def run_single_ticker_hybrid_test(target_ticker: str) -> Dict[str, float]:
+def run_single_ticker_benchmark_test(target_ticker: str) -> List[Dict[str, float]]:
     df_raw = fetch_and_clean_data(target_ticker=target_ticker)
     df_returns = get_log_returns(df_raw)
     train_df, val_df, test_df = strict_data_split(df_returns)
@@ -72,12 +73,22 @@ def run_single_ticker_hybrid_test(target_ticker: str) -> Dict[str, float]:
     y_train = train_df[target_ticker]
     exog_train = train_df[exog_all.columns]
 
+    baseline = LinearRegression().fit(exog_train, y_train)
+    pred_base_test = pd.Series(baseline.predict(test_df[exog_all.columns]), index=test_df.index, name="Baseline (OLS)")
+
+    xgb = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
+    xgb.fit(exog_train, y_train)
+    pred_xgb_test = pd.Series(xgb.predict(test_df[exog_all.columns]), index=test_df.index, name="XGBoost")
+
+    pred_lstm_test = run_lstm_benchmark(y_train, val_df[target_ticker], test_df[target_ticker])
+    pred_lstm_test.name = "LSTM"
+
     arimax_model = SARIMAX(y_train.values, exog=exog_train.values, order=(1, 0, 1)).fit(maxiter=1000, disp=False)
     pred_in = arimax_model.predict(start=0, end=len(y_train) - 1)
     exog_oos = exog_all.iloc[len(y_train):].values
     pred_oos = arimax_model.predict(start=len(y_train), end=len(y_all) - 1, exog=exog_oos)
     pred_arimax_all = pd.Series(np.concatenate([pred_in, pred_oos]), index=y_all.index)
-    pred_arimax_test = pd.Series(pred_arimax_all.loc[test_df.index].values, index=test_df.index)
+    pred_arimax_test = pd.Series(pred_arimax_all.loc[test_df.index].values, index=test_df.index, name="ARIMAX")
 
     true_residuals = y_all - pred_arimax_all
     mlp_features = pd.DataFrame(index=y_all.index)
@@ -133,13 +144,33 @@ def run_single_ticker_hybrid_test(target_ticker: str) -> Dict[str, float]:
 
     mlp_pred_resid = pd.Series(model_mlp.predict(X_mlp_test_sc, verbose=0).ravel(), index=mlp_test.index)
     pred_hybrid_test = pred_arimax_test.loc[mlp_test.index] + mlp_pred_resid
+    pred_hybrid_test.name = "Hibrit ARIMAX-MLP"
     y_test_final = test_df[target_ticker].loc[pred_hybrid_test.index]
     if y_test_final.empty:
         raise ValueError("Test kümesinde eşleşen gözlem yok")
 
-    rmse = float(np.sqrt(mean_squared_error(y_test_final, pred_hybrid_test)))
-    mae = float(mean_absolute_error(y_test_final, pred_hybrid_test))
-    return {"RMSE": rmse, "MAE": mae, "Test Gözlem": int(len(y_test_final))}
+    predictions_df = pd.DataFrame(
+        {
+            pred_base_test.name: pred_base_test.loc[y_test_final.index],
+            pred_xgb_test.name: pred_xgb_test.loc[y_test_final.index],
+            pred_lstm_test.name: pred_lstm_test.loc[y_test_final.index],
+            pred_arimax_test.name: pred_arimax_test.loc[y_test_final.index],
+            pred_hybrid_test.name: pred_hybrid_test,
+        }
+    )
+    rows = []
+    for model_name in ROBUST_TEST_MODELS:
+        p = predictions_df[model_name]
+        rows.append(
+            {
+                "Model": model_name,
+                "RMSE": float(np.sqrt(mean_squared_error(y_test_final, p))),
+                "MAE": float(mean_absolute_error(y_test_final, p)),
+                "Test Gözlem": int(len(y_test_final)),
+                "Durum": "Başarılı",
+            }
+        )
+    return rows
 
 
 def run_robust_test_for_stocks(stocks: List[str]) -> pd.DataFrame:
@@ -147,28 +178,21 @@ def run_robust_test_for_stocks(stocks: List[str]) -> pd.DataFrame:
     for stock in stocks:
         ticker = stock if "." in stock else f"{stock}.IS"
         try:
-            result = run_single_ticker_hybrid_test(ticker)
-            rows.append(
-                {
-                    "Hisse": stock,
-                    "Model": "Hibrit ARIMAX-MLP",
-                    "RMSE": result["RMSE"],
-                    "MAE": result["MAE"],
-                    "Test Gözlem": result["Test Gözlem"],
-                    "Durum": "Başarılı",
-                }
-            )
+            model_rows = run_single_ticker_benchmark_test(ticker)
+            for row in model_rows:
+                rows.append({"Hisse": stock, **row})
         except Exception as exc:
-            rows.append(
-                {
-                    "Hisse": stock,
-                    "Model": "Hibrit ARIMAX-MLP",
-                    "RMSE": np.nan,
-                    "MAE": np.nan,
-                    "Test Gözlem": 0,
-                    "Durum": f"Hata: {exc}",
-                }
-            )
+            for model_name in ROBUST_TEST_MODELS:
+                rows.append(
+                    {
+                        "Hisse": stock,
+                        "Model": model_name,
+                        "RMSE": np.nan,
+                        "MAE": np.nan,
+                        "Test Gözlem": 0,
+                        "Durum": f"Hata: {exc}",
+                    }
+                )
     return pd.DataFrame(rows)
 
 def get_log_returns(df: pd.DataFrame):
