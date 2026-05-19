@@ -1,397 +1,631 @@
-# =========================================================
-# EREGL Forecasting Project - FULL DATA INSPECTION PIPELINE
-# =========================================================
-# Amaç:
-# Veriyi modele başlamadan önce detaylı incelemek.
-#
-# İçerik:
-# 1. Veri indirme
-# 2. Temizleme
-# 3. Missing value analizi
-# 4. Descriptive statistics
-# 5. Correlation
-# 6. Lag correlation
-# 7. Stationarity (ADF)
-# 8. Volatility
-# 9. Outlier kontrolü
-# 10. Granger causality
-# 11. ACF/PACF
-# 12. Sana uygun özet çıktı üretimi
-# =========================================================
+"""ARIMAX + MLP PURE HYBRID PIPELINE (Champion ML Logic + Full Academic Reporting)."""
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
-import yfinance as yf
-import pandas as pd
-import numpy as np
+from pathlib import Path
+from typing import Dict
 
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-
+import tensorflow as tf
+import yfinance as yf
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
+from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.tsa.stattools import grangercausalitytests
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Sequential
+from xgboost import XGBRegressor
 
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+plt.rcParams["figure.dpi"] = 300
+plt.rcParams["savefig.dpi"] = 300
+sns.set_style("whitegrid")
 
-# =========================================================
-# TICKERS
-# =========================================================
-
+# --- KÜRESEL DEĞİŞKENLER ---
 TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 FX_TICKER = "USDTRY=X"
 
-START = "2021-04-01"
-END = "2026-05-30"
-INTERVAL = "1d"
-
-# =========================================================
-# DOWNLOAD DATA
-# =========================================================
-
-tickers = {
-    "EREGL": TARGET_TICKER,
-    "CARBON": CARBON_TICKER,
-    "IRON": IRON_TICKER,
-    "USDTRY": FX_TICKER,
+MODEL_COLORS = {
+    "Baseline (OLS)": "#6c7a89",
+    "XGBoost": "#72b7b2",
+    "LSTM": "#f58518",
+    "ARIMAX": "#4c78a8",
+    "Hibrit ARIMAX-MLP": "#8b0000",
 }
 
-all_data = {}
+STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 
-for name, ticker in tickers.items():
 
-    print(f"\nDownloading {ticker} ...")
+# ==========================================
+# 1. VERİ ÇEKME VE HAZIRLIK
+# ==========================================
+def fetch_and_clean_data() -> pd.DataFrame:
+    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
+    raw = yf.download(
+        tickers=tickers,
+        start="2023-10-01",
+        end="2026-05-17",
+        interval="1d",
+        progress=False,
+    )
+    df = (
+        raw["Close"]
+        if isinstance(raw.columns, pd.MultiIndex)
+        else raw.rename(columns={"Close": TARGET_TICKER})[tickers]
+    )
+    return df.reindex(columns=tickers).ffill().bfill().dropna()
 
-    temp = yf.download(
-        ticker,
-        start=START,
-        end=END,
-        interval=INTERVAL,
-        auto_adjust=True,
-        progress=False
+
+def get_log_returns(df: pd.DataFrame):
+    return np.log(df / df.shift(1)).dropna()
+
+
+def strict_data_split(df: pd.DataFrame):
+    n = len(df)
+    train_end = int(n * 0.80)
+    val_end = train_end + int(n * 0.10)
+    return (
+        df.iloc[:train_end].copy(),
+        df.iloc[train_end:val_end].copy(),
+        df.iloc[val_end:].copy(),
     )
 
-    # MultiIndex flatten
-    temp.columns = [col[0] if isinstance(col, tuple) else col for col in temp.columns]
 
-    temp = temp[["Open", "High", "Low", "Close", "Volume"]]
-
-    temp.columns = [f"{name}_{col}" for col in temp.columns]
-
-    all_data[name] = temp
-
-# =========================================================
-# MERGE
-# =========================================================
-
-df = pd.concat(all_data.values(), axis=1)
-
-print("\n======================")
-print("RAW SHAPE")
-print("======================")
-print(df.shape)
-
-# =========================================================
-# MISSING VALUES
-# =========================================================
-
-print("\n======================")
-print("MISSING VALUES")
-print("======================")
-print(df.isna().sum())
-
-missing_ratio = (df.isna().sum() / len(df)) * 100
-
-print("\nMissing Ratio (%)")
-print(missing_ratio)
-
-# forward fill
-df = df.ffill()
-
-# =========================================================
-# BASIC INFO
-# =========================================================
-
-print("\n======================")
-print("DATA INFO")
-print("======================")
-print(df.info())
-
-# =========================================================
-# CREATE RETURNS
-# =========================================================
-
-close_cols = [c for c in df.columns if "Close" in c]
-
-returns = pd.DataFrame(index=df.index)
-
-for col in close_cols:
-    returns[col + "_RET"] = np.log(df[col] / df[col].shift(1))
-
-returns = returns.dropna()
-
-# =========================================================
-# DESCRIPTIVE STATISTICS
-# =========================================================
-
-print("\n======================")
-print("DESCRIPTIVE STATS")
-print("======================")
-
-stats = returns.describe().T
-
-stats["skew"] = returns.skew()
-stats["kurtosis"] = returns.kurtosis()
-
-print(stats)
-
-# =========================================================
-# PRICE PLOTS
-# =========================================================
-
-plt.figure(figsize=(16,8))
-
-for col in close_cols:
-    plt.plot(df.index, df[col], label=col)
-
-plt.title("Close Prices")
-plt.legend()
-plt.show()
-
-# =========================================================
-# RETURN PLOTS
-# =========================================================
-
-plt.figure(figsize=(16,8))
-
-for col in returns.columns:
-    plt.plot(returns.index, returns[col], label=col)
-
-plt.title("Log Returns")
-plt.legend()
-plt.show()
-
-# =========================================================
-# CORRELATION MATRIX
-# =========================================================
-
-corr = returns.corr()
-
-print("\n======================")
-print("CORRELATION MATRIX")
-print("======================")
-print(corr)
-
-print(returns["EREGL_Close_RET"].autocorr(lag=1))
-
-from statsmodels.stats.diagnostic import acorr_ljungbox
-
-lb = acorr_ljungbox(
-    returns["EREGL_Close_RET"],
-    lags=[5,10,20],
-    return_df=True
-)
-
-print(lb)
-
-plt.figure(figsize=(10,8))
-
-
-sns.heatmap(
-    corr,
-    annot=True,
-    cmap="coolwarm",
-    fmt=".2f"
-)
-
-plt.title("Return Correlation Matrix")
-plt.show()
-
-# =========================================================
-# ROLLING VOLATILITY
-# =========================================================
-
-rolling_vol = returns.rolling(20).std()
-
-plt.figure(figsize=(16,8))
-
-for col in rolling_vol.columns:
-    plt.plot(rolling_vol.index, rolling_vol[col], label=col)
-
-plt.title("20-Day Rolling Volatility")
-plt.legend()
-plt.show()
-
-# =========================================================
-# ADF TEST
-# =========================================================
-
-print("\n======================")
-print("ADF TEST")
-print("======================")
-
-def adf_test(series, name):
-
-    result = adfuller(series.dropna())
-
-    print(f"\n{name}")
-    print(f"ADF Statistic : {result[0]:.4f}")
-    print(f"P-value       : {result[1]:.6f}")
-
-    if result[1] < 0.05:
-        print("Stationary ✅")
-    else:
-        print("Not Stationary ❌")
-
-for col in returns.columns:
-    adf_test(returns[col], col)
-
-# =========================================================
-# OUTLIER CHECK
-# =========================================================
-
-print("\n======================")
-print("OUTLIER CHECK")
-print("======================")
-
-z_scores = (returns - returns.mean()) / returns.std()
-
-outliers = (np.abs(z_scores) > 3).sum()
-
-print(outliers)
-
-# =========================================================
-# LAG CORRELATION
-# =========================================================
-
-print("\n======================")
-print("LAG CORRELATION")
-print("======================")
-
-target = "EREGL_Close_RET"
-
-for feature in [
-    "CARBON_Close_RET",
-    "IRON_Close_RET",
-    "USDTRY_Close_RET"
-]:
-
-    print(f"\n{feature} vs {target}")
-
-    lag_corrs = {}
-
-    for lag in range(1, 15):
-
-        corr = returns[target].corr(
-            returns[feature].shift(lag)
+# ==========================================
+# 2. GÖRSELLEŞTİRME VE RAPORLAMA MODÜLLERİ
+# ==========================================
+def plot_raw_time_series(df_raw: pd.DataFrame):
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+
+    # Ana başlık (y parametresine gerek kalmadı, tight_layout halledecek)
+    fig.suptitle(
+        "Ham Veri Zaman Serisi Özeti\n(Ekim 2023 - Mayıs 2026)",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    # EREGL.IS - Mavi
+    axes[0].plot(df_raw.index, df_raw["EREGL.IS"], color="#1f77b4", linewidth=1.5)
+    axes[0].set_title("EREGL.IS - Kapanış Fiyatı (TL)", fontsize=10, fontweight="bold")
+    axes[0].set_ylabel("Fiyat")
+
+    # KEUA - Yeşil
+    axes[1].plot(df_raw.index, df_raw["KEUA"], color="#2ca02c", linewidth=1.5)
+    axes[1].set_title("KEUA - Karbon Fonu Fiyatı", fontsize=10, fontweight="bold")
+    axes[1].set_ylabel("Fiyat")
+
+    # TIO=F - Kırmızı
+    axes[2].plot(df_raw.index, df_raw["TIO=F"], color="#d62728", linewidth=1.5)
+    axes[2].set_title(
+        "TIO=F - Demir Cevheri Vadeli İşlem Fiyatı", fontsize=10, fontweight="bold"
+    )
+    axes[2].set_ylabel("Fiyat")
+
+    # USDTRY=X - Mor
+    axes[3].plot(df_raw.index, df_raw["USDTRY=X"], color="#9467bd", linewidth=1.5)
+    axes[3].set_title("USDTRY=X - USD/TRY Kuru", fontsize=10, fontweight="bold")
+    axes[3].set_ylabel("Kur")
+    axes[3].set_xlabel("Tarih")
+
+    # KESİN ÇÖZÜM BURASI:
+    # rect=[sol, alt, sağ, üst] -> Üst limiti 0.88 yaparak tepeye devasa bir nefes alma boşluğu bırakıyoruz.
+    # h_pad=2.0 ise 4 grafiğin kendi aralarındaki dikey boşluğu açıyor.
+    plt.tight_layout(rect=[0, 0, 1, 0.98], h_pad=2.0)
+
+    plt.savefig("Grafik_0a_Ham_Veri_Zaman_Serisi.png")
+    plt.close()
+    print("Ham veri grafiği oluşturuldu: Grafik_0a_Ham_Veri_Zaman_Serisi.png")
+
+
+def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(
+        corr_matrix,
+        annot=True,
+        fmt=".4f",
+        cmap="coolwarm",
+        vmin=-1,
+        vmax=1,
+        linewidths=0.5,
+        ax=ax,
+    )
+    ax.set_title(
+        "Temel Değişkenler Korelasyon Isı Haritası\n(Ham Kapanış Fiyatları)",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    plt.savefig("Grafik_0_Korelasyon_Heatmap.png")
+    plt.close()
+
+
+def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
+    dates = pd.bdate_range(last_test_date + pd.offsets.BDay(1), periods=30)
+    base = np.full(len(dates), base_price)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(
+        dates,
+        base,
+        color="black",
+        linestyle=":",
+        linewidth=2.2,
+        label="Baz Senaryo Fiyatı",
+    )
+
+    colors = {"S1 (+%30)": "#ffb703", "S2 (+%60)": "#fb8500", "S3 (+%100)": "#d00000"}
+    prev_upper, prev_lower = base.copy(), base.copy()
+
+    for scenario, shock in STRESS_BANDS.items():
+        upper = base * (1 + shock)
+        lower = base * (1 - shock)
+        plt.plot(dates, upper, color=colors[scenario], linewidth=1.4, alpha=0.9)
+        plt.plot(dates, lower, color=colors[scenario], linewidth=1.4, alpha=0.9)
+        plt.fill_between(
+            dates,
+            prev_upper,
+            upper,
+            color=colors[scenario],
+            alpha=0.12,
+            label=f"{scenario} Üst Bant",
+        )
+        plt.fill_between(
+            dates,
+            lower,
+            prev_lower,
+            color=colors[scenario],
+            alpha=0.12,
+            label=f"{scenario} Alt Bant",
+        )
+        prev_upper, prev_lower = upper, lower
+
+    plt.title(
+        "Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.xlabel("Tarih")
+    plt.ylabel("Hisse Fiyatı (TL)")
+    plt.legend(loc="upper left", ncol=2, fontsize=8)
+    plt.tight_layout()
+    plt.savefig("Grafik_4_Stres_Testi_Fan.png")
+    plt.close()
+
+
+def run_stress_test(base_price: float) -> pd.DataFrame:
+    rows = [
+        {
+            "Senaryo": sc,
+            "Şok Oranı": f"+%{int(sh * 100)}",
+            "Alt Bant Fiyatı": base_price * (1 - sh),
+            "Baz Senaryo Fiyatı": base_price,
+            "Üst Bant Fiyatı": base_price * (1 + sh),
+        }
+        for sc, sh in STRESS_BANDS.items()
+    ]
+    return pd.DataFrame(rows)
+
+
+def plot_all_visualizations(
+    y_test_final, predictions_df, metrics_df, hybrid_resid, xgb_resid
+):
+    # 1. RMSE Bar Chart
+    plt.figure(figsize=(10, 6))
+    sns.barplot(
+        data=metrics_df,
+        x="Model",
+        y="RMSE",
+        palette=[MODEL_COLORS.get(x, "#333") for x in metrics_df["Model"]],
+    )
+    ax = plt.gca()
+    for p in ax.patches:
+        ax.annotate(
+            f"{p.get_height():.6f}",
+            (p.get_x() + p.get_width() / 2.0, p.get_height()),
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="black",
+            xytext=(0, 5),
+            textcoords="offset points",
+        )
+    plt.title(
+        "Modellerin Test Kümesi RMSE Karşılaştırması",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.xticks(rotation=15)
+    plt.tight_layout()
+    plt.savefig("Grafik_1_RMSE_Bar.png")
+    plt.close()
+
+    # 2. Prediction Line Chart
+    plt.figure(figsize=(12, 6))
+    plt.plot(
+        y_test_final.index,
+        y_test_final.values,
+        color="black",
+        label="Gerçek EREGL.IS",
+        linewidth=2.2,
+        linestyle="--",
+    )
+    for model_col in predictions_df.columns:
+        lw = 2.5 if "Hibrit" in model_col else 1.2
+        alpha = 1.0 if "Hibrit" in model_col else 0.75
+        plt.plot(
+            predictions_df.index,
+            predictions_df[model_col],
+            label=model_col,
+            color=MODEL_COLORS.get(model_col, "#808080"),
+            linewidth=lw,
+            alpha=alpha,
+        )
+    plt.title(
+        "Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.ylabel("Log Getiri")
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig("Grafik_2_Prediction_Line.png")
+    plt.close()
+
+    # 3. Residual KDE
+    plt.figure(figsize=(10, 6))
+    sns.kdeplot(
+        data=xgb_resid,
+        label="XGBoost Hata Dağılımı",
+        color=MODEL_COLORS["XGBoost"],
+        fill=True,
+        alpha=0.3,
+    )
+    sns.kdeplot(
+        data=hybrid_resid,
+        label="Hibrit Model Hata Dağılımı",
+        color=MODEL_COLORS["Hibrit ARIMAX-MLP"],
+        fill=True,
+        alpha=0.5,
+    )
+    plt.title(
+        "Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)",
+        pad=15,
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.xlabel("Tahmin Hatası (Gerçek - Tahmin)")
+    plt.ylabel("Yoğunluk (Density)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("Grafik_3_Residual_KDE.png")
+    plt.close()
+
+
+def write_thesis_report(
+    raw_stats,
+    raw_corr,
+    ret_stats,
+    adf_res,
+    arimax_summary,
+    arimax_coef,
+    diag_df,
+    metrics_df,
+    stress_df,
+):
+    lines = [
+        "TEZ BULGULARI RAPORU",
+        "=" * 80,
+        "",
+        "TABLO 4.1: BETİMSEL İSTATİSTİKLER (LOG GETİRİ)",
+        "-" * 80,
+        ret_stats.to_string(float_format=lambda x: f"{x:.6f}"),
+        "",
+        "=" * 80,
+        "",
+        "1) TEMEL İSTATİSTİKLER VE KORELASYON ANALİZİ (HAM VERİ)",
+        "-" * 80,
+        "1a) Temel İstatistikler (Ham Kapanış Fiyatları):",
+        raw_stats.to_string(float_format=lambda x: f"{x:.4f}"),
+        "",
+        "1b) Korelasyon Matrisi (Ham Kapanış Fiyatları):",
+        raw_corr.to_string(float_format=lambda x: f"{x:.6f}"),
+        "",
+        "2) ADF TEST SONUÇLARI (GETİRİ SERİSİ)",
+        "-" * 80,
+    ]
+    for col, pval in adf_res.items():
+        lines.append(
+            f"{col}: ADF p-değeri={pval:.6f} -> {'DURAĞAN' if pval < 0.05 else 'DURAĞAN DEĞİL'}"
         )
 
-        lag_corrs[lag] = corr
+    lines.extend(
+        [
+            "",
+            "3) ARIMAX MODEL ÖZETİ",
+            "-" * 80,
+            arimax_summary,
+            "",
+            "TABLO 4.2: ARIMAX KATSAYI TABLOSU",
+            "-" * 80,
+            arimax_coef,
+            "",
+            "4) RESIDUAL TANI TESTLERİ (LJUNG-BOX / ARCH-LM - HİBRİT MODEL)",
+            "-" * 80,
+            diag_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+            "",
+            "5) TEST KÜMESİ PERFORMANS METRİKLERİ (RMSE / MAE)",
+            "-" * 80,
+            metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+            "",
+            "6) STRES TESTİ SONUÇ TABLOSU (GERÇEK TL FİYATI ÜZERİNDEN)",
+            "-" * 80,
+            stress_df.to_string(index=False, float_format=lambda x: f"{x:.2f}"),
+            "",
+        ]
+    )
 
-    lag_df = pd.DataFrame({
-        "Lag": lag_corrs.keys(),
-        "Correlation": lag_corrs.values()
-    })
+    Path("Tez_Bulgulari_Raporu.txt").write_text("\n".join(lines), encoding="utf-8")
+    print("\nTez raporu başarıyla oluşturuldu: Tez_Bulgulari_Raporu.txt")
 
-    print(lag_df)
 
-# =========================================================
-# GRANGER CAUSALITY
-# =========================================================
+# ==========================================
+# 3. BENCHMARK: LSTM
+# ==========================================
+def run_lstm_benchmark(y_train, y_val, y_test, window_size=5):
+    def create_dataset(series):
+        X, y = [], []
+        for i in range(window_size, len(series)):
+            X.append(series[i - window_size : i])
+            y.append(series[i])
+        return np.array(X).reshape(-1, window_size, 1), np.array(y)
 
-print("\n======================")
-print("GRANGER CAUSALITY")
-print("======================")
+    X_tr, y_tr = create_dataset(y_train.values)
+    X_val, y_val_arr = create_dataset(
+        pd.concat([y_train.iloc[-window_size:], y_val]).values
+    )
+    X_te, _ = create_dataset(pd.concat([y_val.iloc[-window_size:], y_test]).values)
 
-target = returns["EREGL_Close_RET"]
+    tf.keras.utils.set_random_seed(42)
+    model = Sequential([LSTM(32, input_shape=(window_size, 1)), Dropout(0.2), Dense(1)])
+    model.compile(optimizer="adam", loss="mse")
+    es = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss", patience=15, restore_best_weights=True
+    )
+    model.fit(
+        X_tr,
+        y_tr,
+        validation_data=(X_val, y_val_arr),
+        epochs=100,
+        batch_size=16,
+        callbacks=[es],
+        verbose=0,
+    )
 
-for feature in [
-    "CARBON_Close_RET",
-    "IRON_Close_RET",
-    "USDTRY_Close_RET"
-]:
+    return pd.Series(model.predict(X_te, verbose=0).ravel(), index=y_test.index)
 
-    print(f"\nTesting: {feature} -> EREGL")
 
-    test_df = returns[
-        [target.name, feature]
-    ].dropna()
+# ==========================================
+# 4. ANA ÇALIŞTIRMA BORU HATTI
+# ==========================================
+def run_pipeline():
+    print("=== 1. Veri Hazırlama ===")
+    df_raw = fetch_and_clean_data()
 
-    try:
+    plot_raw_time_series(df_raw)
 
-        results = grangercausalitytests(
-            test_df,
-            maxlag=5,
-            verbose=False
-        )
+    df_returns = get_log_returns(df_raw)
 
-        for lag in range(1, 6):
+    # Veri Raporu İçin İstatistikler
+    raw_stats = df_raw.describe()
+    raw_corr = df_raw.corr()
+    plot_correlation_heatmap(raw_corr)
 
-            p_value = results[lag][0]["ssr_ftest"][1]
+    ret_stats = df_returns.describe().T[["mean", "std", "min", "max"]]
+    ret_stats["skewness"] = df_returns.skew()
+    ret_stats.columns = [
+        "Ortalama (Mean)",
+        "Standart Sapma (Std)",
+        "Min",
+        "Max",
+        "Çarpıklık (Skewness)",
+    ]
 
-            print(f"Lag {lag} p-value: {p_value:.6f}")
+    adf_res = {col: adfuller(df_returns[col].dropna())[1] for col in df_returns.columns}
 
-    except:
-        print("Granger test failed.")
+    train_df, val_df, test_df = strict_data_split(df_returns)
+    y_all = df_returns[TARGET_TICKER]
+    exog_all = df_returns[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
 
-# =========================================================
-# ACF & PACF
-# =========================================================
+    y_train = train_df[TARGET_TICKER]
+    exog_train = train_df[exog_all.columns]
 
-target_series = returns["EREGL_Close_RET"].dropna()
+    print("\n=== 2. Benchmark Modeller Eğitiliyor ===")
+    baseline = LinearRegression().fit(exog_train, y_train)
+    pred_base_test = pd.Series(
+        baseline.predict(test_df[exog_all.columns]),
+        index=test_df.index,
+        name="Baseline (OLS)",
+    )
 
-fig, ax = plt.subplots(1, 2, figsize=(16,5))
+    xgb = XGBRegressor(
+        n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42
+    )
+    xgb.fit(exog_train, y_train)
+    pred_xgb_test = pd.Series(
+        xgb.predict(test_df[exog_all.columns]), index=test_df.index, name="XGBoost"
+    )
 
-plot_acf(target_series, lags=40, ax=ax[0])
-plot_pacf(target_series, lags=40, ax=ax[1])
+    pred_lstm_test = run_lstm_benchmark(
+        y_train, val_df[TARGET_TICKER], test_df[TARGET_TICKER]
+    )
+    pred_lstm_test.name = "LSTM"
 
-ax[0].set_title("ACF")
-ax[1].set_title("PACF")
+    print("ARIMAX(1,0,1) Modeli Eğitiliyor...")
+    arimax_model = SARIMAX(y_train.values, exog=exog_train.values, order=(1, 0, 1)).fit(
+        maxiter=1000, disp=False
+    )
+    arimax_summary = str(arimax_model.summary())
+    arimax_coef = str(arimax_model.summary().tables[1])
 
-plt.show()
+    pred_in = arimax_model.predict(start=0, end=len(y_train) - 1)
+    exog_oos = exog_all.iloc[len(y_train) :].values
+    pred_oos = arimax_model.predict(
+        start=len(y_train), end=len(y_all) - 1, exog=exog_oos
+    )
 
-# =========================================================
-# FINAL SUMMARY
-# =========================================================
+    pred_arimax_all = pd.Series(np.concatenate([pred_in, pred_oos]), index=y_all.index)
+    pred_arimax_test = pd.Series(
+        pred_arimax_all.loc[test_df.index].values, index=test_df.index, name="ARIMAX"
+    )
 
-print("\n===================================================")
-print("FINAL SUMMARY")
-print("===================================================")
+    print("\n=== 3. Hibrit MLP Feature Engineering ===")
+    true_residuals = y_all - pred_arimax_all
 
-print(f"""
-1. Dataset Shape:
-{df.shape}
+    mlp_features = pd.DataFrame(index=y_all.index)
+    mlp_features["X1_t"] = exog_all[CARBON_TICKER]
+    mlp_features["X1_t_minus_1"] = exog_all[CARBON_TICKER].shift(1)
+    mlp_features["X3_t"] = exog_all[FX_TICKER]
+    mlp_features["X3_t_minus_1"] = exog_all[FX_TICKER].shift(1)
+    mlp_features["e_t_minus_1"] = true_residuals.shift(1)
+    mlp_features["e_t_minus_2"] = true_residuals.shift(2)
 
-2. Date Range:
-{df.index.min()} --> {df.index.max()}
+    mlp_df = pd.concat(
+        [mlp_features, true_residuals.rename("Target_Residual")], axis=1
+    ).dropna()
 
-3. Variables:
-{list(df.columns)}
+    mlp_train = mlp_df.loc[mlp_df.index.isin(train_df.index)]
+    mlp_val = mlp_df.loc[mlp_df.index.isin(val_df.index)]
+    mlp_test = mlp_df.loc[mlp_df.index.isin(test_df.index)]
 
-4. Return Variables:
-{list(returns.columns)}
+    X_mlp_train, y_mlp_train = (
+        mlp_train.drop(columns="Target_Residual"),
+        mlp_train["Target_Residual"],
+    )
+    X_mlp_val, y_mlp_val = (
+        mlp_val.drop(columns="Target_Residual"),
+        mlp_val["Target_Residual"],
+    )
+    X_mlp_test = mlp_test.drop(columns="Target_Residual")
 
-5. Most Correlated With EREGL:
-{corr["EREGL_Close_RET"].sort_values(ascending=False)}
+    scaler_X = MinMaxScaler()
+    X_mlp_train_sc = scaler_X.fit_transform(X_mlp_train)
+    X_mlp_val_sc = scaler_X.transform(X_mlp_val)
+    X_mlp_test_sc = scaler_X.transform(X_mlp_test)
 
-6. Stationarity:
-ADF p-values mostly < 0.05 ise returns stationary.
+    print("\n=== 4. Yapay Sinir Ağı (MLP) Eğitiliyor ===")
+    tf.keras.utils.set_random_seed(7)
 
-7. Things To Look For:
-- Strong lag correlations?
-- Significant granger causality?
-- Volatility clustering?
-- Heavy outliers?
-- ACF decay structure?
+    model_mlp = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(shape=(X_mlp_train_sc.shape[1],)),
+            tf.keras.layers.Dense(64, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(32, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(16, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(1, activation="linear"),
+        ]
+    )
 
-8. Model Strategy Suggestions:
-- ARIMA -> if strong autocorrelation
-- ARIMAX -> if exogenous vars significant
-- XGBoost -> nonlinear lag effects
-- LSTM -> temporal nonlinear patterns
-- Hybrid -> residual structures remain
-""")
+    model_mlp.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.01),
+        loss=tf.keras.losses.Huber(delta=0.05),
+    )
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss", patience=20, restore_best_weights=True
+    )
 
-print("\nDONE ✅")
+    model_mlp.fit(
+        X_mlp_train_sc,
+        y_mlp_train.values,
+        validation_data=(X_mlp_val_sc, y_mlp_val.values),
+        epochs=150,
+        batch_size=8,
+        callbacks=[early_stopping],
+        verbose=0,
+    )
+
+    mlp_pred_resid = pd.Series(
+        model_mlp.predict(X_mlp_test_sc, verbose=0).ravel(), index=mlp_test.index
+    )
+    pred_hybrid_test = pred_arimax_test.loc[mlp_test.index] + mlp_pred_resid
+    pred_hybrid_test.name = "Hibrit ARIMAX-MLP"
+
+    print("\n=== 5. Analiz, Raporlama ve Stres Testi ===")
+    idx = pred_hybrid_test.index
+    y_test_final = test_df[TARGET_TICKER].loc[idx]
+
+    predictions_df = pd.DataFrame(
+        {
+            pred_base_test.name: pred_base_test.loc[idx],
+            pred_xgb_test.name: pred_xgb_test.loc[idx],
+            pred_lstm_test.name: pred_lstm_test.loc[idx],
+            pred_arimax_test.name: pred_arimax_test.loc[idx],
+            pred_hybrid_test.name: pred_hybrid_test,
+        }
+    )
+
+    metrics = []
+    for col in predictions_df.columns:
+        p = predictions_df[col]
+        rmse = float(np.sqrt(mean_squared_error(y_test_final, p)))
+        mae = float(mean_absolute_error(y_test_final, p))
+        metrics.append({"Model": col, "RMSE": rmse, "MAE": mae})
+
+    metrics_df = pd.DataFrame(metrics).sort_values(by="RMSE").reset_index(drop=True)
+    print("\nTest Seti Performans Tablosu:")
+    print(metrics_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+
+    # Diagnostik Testler
+    hybrid_resid = y_test_final - pred_hybrid_test
+    xgb_resid = y_test_final - predictions_df["XGBoost"]
+
+    lb_pval = float(
+        acorr_ljungbox(hybrid_resid, lags=[10], return_df=True)["lb_pvalue"].iloc[0]
+    )
+    arch_pval = float(het_arch(hybrid_resid.dropna())[1])
+    diag_df = pd.DataFrame(
+        [
+            {"Test": "Ljung-Box (lag=10)", "p-değeri": lb_pval},
+            {"Test": "ARCH-LM", "p-değeri": arch_pval},
+        ]
+    )
+
+    # Stres Testi (Gerçek Fiyat üzerinden)
+    real_base_price = float(df_raw[TARGET_TICKER].iloc[-1])
+    stress_df = run_stress_test(real_base_price)
+
+    # Görseller ve Rapor
+    plot_stress_test_fan_chart(y_test_final.index[-1], real_base_price)
+    plot_all_visualizations(
+        y_test_final, predictions_df, metrics_df, hybrid_resid, xgb_resid
+    )
+
+    write_thesis_report(
+        raw_stats,
+        raw_corr,
+        ret_stats,
+        adf_res,
+        arimax_summary,
+        arimax_coef,
+        diag_df,
+        metrics_df,
+        stress_df,
+    )
+
+
+if __name__ == "__main__":
+    run_pipeline()

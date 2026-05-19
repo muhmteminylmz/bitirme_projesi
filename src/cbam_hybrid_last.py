@@ -47,7 +47,7 @@ STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 # ==========================================
 def fetch_and_clean_data() -> pd.DataFrame:
     tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
-    raw = yf.download(tickers=tickers, start="2023-10-01", end=None, interval="1d", progress=False)
+    raw = yf.download(tickers=tickers, start="2023-10-01", end="2026-05-17", interval="1d", progress=False)
     df = raw['Close'] if isinstance(raw.columns, pd.MultiIndex) else raw.rename(columns={"Close": TARGET_TICKER})[tickers]
     return df.reindex(columns=tickers).ffill().bfill().dropna()
 
@@ -63,10 +63,47 @@ def strict_data_split(df: pd.DataFrame):
 # ==========================================
 # 2. GÖRSELLEŞTİRME VE RAPORLAMA MODÜLLERİ
 # ==========================================
+def plot_raw_time_series(df_raw: pd.DataFrame):
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    
+    # Ana başlık (y parametresine gerek kalmadı, tight_layout halledecek)
+    fig.suptitle("Ham Veri Zaman Serisi Özeti\n(Ekim 2023 - Mayıs 2026)", 
+                 fontsize=14, fontweight="bold")
+
+    # EREGL.IS - Mavi
+    axes[0].plot(df_raw.index, df_raw["EREGL.IS"], color="#1f77b4", linewidth=1.5)
+    axes[0].set_title("EREGL.IS - Kapanış Fiyatı (TL)", fontsize=10, fontweight="bold")
+    axes[0].set_ylabel("Fiyat")
+
+    # KEUA - Yeşil
+    axes[1].plot(df_raw.index, df_raw["KEUA"], color="#2ca02c", linewidth=1.5)
+    axes[1].set_title("KEUA - Karbon Fonu Fiyatı", fontsize=10, fontweight="bold")
+    axes[1].set_ylabel("Fiyat")
+
+    # TIO=F - Kırmızı
+    axes[2].plot(df_raw.index, df_raw["TIO=F"], color="#d62728", linewidth=1.5)
+    axes[2].set_title("TIO=F - Demir Cevheri Vadeli İşlem Fiyatı", fontsize=10, fontweight="bold")
+    axes[2].set_ylabel("Fiyat")
+
+    # USDTRY=X - Mor
+    axes[3].plot(df_raw.index, df_raw["USDTRY=X"], color="#9467bd", linewidth=1.5)
+    axes[3].set_title("USDTRY=X - USD/TRY Kuru", fontsize=10, fontweight="bold")
+    axes[3].set_ylabel("Kur")
+    axes[3].set_xlabel("Tarih")
+
+    # KESİN ÇÖZÜM BURASI: 
+    # rect=[sol, alt, sağ, üst] -> Üst limiti 0.88 yaparak tepeye devasa bir nefes alma boşluğu bırakıyoruz.
+    # h_pad=2.0 ise 4 grafiğin kendi aralarındaki dikey boşluğu açıyor.
+    plt.tight_layout(rect=[0, 0, 1, 0.98], h_pad=2.0)
+    
+    plt.savefig("Grafik_0a_Ham_Veri_Zaman_Serisi.png")
+    plt.close()
+    print("Ham veri grafiği oluşturuldu: Grafik_0a_Ham_Veri_Zaman_Serisi.png")
+
 def plot_correlation_heatmap(corr_matrix: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(corr_matrix, annot=True, fmt=".4f", cmap="coolwarm", vmin=-1, vmax=1, linewidths=0.5, ax=ax)
-    ax.set_title("Şekil 0: Temel Değişkenler Korelasyon Isı Haritası\n(Ham Kapanış Fiyatları)", pad=15, fontsize=12, fontweight="bold")
+    ax.set_title("Temel Değişkenler Korelasyon Isı Haritası\n(Ham Kapanış Fiyatları)", pad=15, fontsize=12, fontweight="bold")
     plt.tight_layout()
     plt.savefig("Grafik_0_Korelasyon_Heatmap.png")
     plt.close()
@@ -90,7 +127,7 @@ def plot_stress_test_fan_chart(last_test_date: pd.Timestamp, base_price: float):
         plt.fill_between(dates, lower, prev_lower, color=colors[scenario], alpha=0.12, label=f"{scenario} Alt Bant")
         prev_upper, prev_lower = upper, lower
 
-    plt.title("Şekil 4.4: Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Test Sonrası 30 Gün Karbon Stres Testi Yelpaze Grafiği (Gerçek Fiyat)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tarih")
     plt.ylabel("Hisse Fiyatı (TL)")
     plt.legend(loc="upper left", ncol=2, fontsize=8)
@@ -111,7 +148,7 @@ def plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_res
     for p in ax.patches:
         ax.annotate(f"{p.get_height():.6f}", (p.get_x() + p.get_width() / 2., p.get_height()), 
                     ha='center', va='bottom', fontsize=10, color='black', xytext=(0, 5), textcoords='offset points')
-    plt.title("Şekil 4.1: Modellerin Test Kümesi RMSE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Modellerin Test Kümesi RMSE Karşılaştırması", pad=15, fontsize=12, fontweight="bold")
     plt.xticks(rotation=15)
     plt.tight_layout()
     plt.savefig("Grafik_1_RMSE_Bar.png")
@@ -125,7 +162,7 @@ def plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_res
         alpha = 1.0 if "Hibrit" in model_col else 0.75
         plt.plot(predictions_df.index, predictions_df[model_col], label=model_col, 
                  color=MODEL_COLORS.get(model_col, "#808080"), linewidth=lw, alpha=alpha)
-    plt.title("Şekil 4.2: Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Zaman Serisi Tahmin Performansı (Gerçek vs. Modeller)", pad=15, fontsize=12, fontweight="bold")
     plt.ylabel("Log Getiri")
     plt.legend(loc="best")
     plt.tight_layout()
@@ -136,7 +173,7 @@ def plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_res
     plt.figure(figsize=(10, 6))
     sns.kdeplot(data=xgb_resid, label="XGBoost Hata Dağılımı", color=MODEL_COLORS["XGBoost"], fill=True, alpha=0.3)
     sns.kdeplot(data=hybrid_resid, label="Hibrit Model Hata Dağılımı", color=MODEL_COLORS["Hibrit ARIMAX-MLP"], fill=True, alpha=0.5)
-    plt.title("Şekil 4.3: Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
+    plt.title("Hata Dağılımı Çekirdek Yoğunluk Tahmini (KDE)", pad=15, fontsize=12, fontweight="bold")
     plt.xlabel("Tahmin Hatası (Gerçek - Tahmin)")
     plt.ylabel("Yoğunluk (Density)")
     plt.legend()
@@ -200,6 +237,9 @@ def run_lstm_benchmark(y_train, y_val, y_test, window_size=5):
 def run_pipeline():
     print("=== 1. Veri Hazırlama ===")
     df_raw = fetch_and_clean_data()
+
+    plot_raw_time_series(df_raw)
+
     df_returns = get_log_returns(df_raw)
     
     # Veri Raporu İçin İstatistikler
@@ -283,7 +323,7 @@ def run_pipeline():
         tf.keras.layers.Dense(1, activation="linear"),
     ])
     
-    model_mlp.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss=tf.keras.losses.Huber(delta=0.01))
+    model_mlp.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.01), loss=tf.keras.losses.Huber(delta=0.05))
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
     
     model_mlp.fit(X_mlp_train_sc, y_mlp_train.values, validation_data=(X_mlp_val_sc, y_mlp_val.values),
@@ -310,8 +350,7 @@ def run_pipeline():
         p = predictions_df[col]
         rmse = float(np.sqrt(mean_squared_error(y_test_final, p)))
         mae = float(mean_absolute_error(y_test_final, p))
-        da_score = float(np.mean(np.sign(y_test_final) == np.sign(p)) * 100)
-        metrics.append({"Model": col, "RMSE": rmse, "MAE": mae, "Yön Doğruluğu (%)": da_score})
+        metrics.append({"Model": col, "RMSE": rmse, "MAE": mae})
     
     metrics_df = pd.DataFrame(metrics).sort_values(by="RMSE").reset_index(drop=True)
     print("\nTest Seti Performans Tablosu:")
