@@ -4,7 +4,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,6 +31,7 @@ TARGET_TICKER = "EREGL.IS"
 CARBON_TICKER = "KEUA"
 IRON_TICKER = "TIO=F"
 FX_TICKER = "USDTRY=X"
+ROBUST_TEST_TICKERS = ["AKCNS", "TUPRS", "KRDMD"]
 
 MODEL_COLORS = {
     "Baseline (OLS)": "#6c7a89", 
@@ -45,11 +46,130 @@ STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 # ==========================================
 # 1. VERİ ÇEKME VE HAZIRLIK
 # ==========================================
-def fetch_and_clean_data() -> pd.DataFrame:
-    tickers = [TARGET_TICKER, CARBON_TICKER, IRON_TICKER, FX_TICKER]
+def fetch_and_clean_data(target_ticker: str = TARGET_TICKER) -> pd.DataFrame:
+    tickers = [target_ticker, CARBON_TICKER, IRON_TICKER, FX_TICKER]
     raw = yf.download(tickers=tickers, start="2023-10-01", end="2026-05-17", interval="1d", progress=False)
-    df = raw['Close'] if isinstance(raw.columns, pd.MultiIndex) else raw.rename(columns={"Close": TARGET_TICKER})[tickers]
+    if isinstance(raw.columns, pd.MultiIndex):
+        df = raw["Close"]
+    else:
+        close_obj = raw["Close"] if "Close" in raw.columns else raw
+        df = close_obj.to_frame(name=target_ticker) if isinstance(close_obj, pd.Series) else close_obj
+        if "Close" in df.columns:
+            df = df.rename(columns={"Close": target_ticker})
+    missing_cols = [col for col in tickers if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Eksik veri sütunları: {missing_cols}")
     return df.reindex(columns=tickers).ffill().bfill().dropna()
+
+
+def run_single_ticker_hybrid_test(target_ticker: str) -> Dict[str, float]:
+    df_raw = fetch_and_clean_data(target_ticker=target_ticker)
+    df_returns = get_log_returns(df_raw)
+    train_df, val_df, test_df = strict_data_split(df_returns)
+
+    y_all = df_returns[target_ticker]
+    exog_all = df_returns[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    y_train = train_df[target_ticker]
+    exog_train = train_df[exog_all.columns]
+
+    arimax_model = SARIMAX(y_train.values, exog=exog_train.values, order=(1, 0, 1)).fit(maxiter=1000, disp=False)
+    pred_in = arimax_model.predict(start=0, end=len(y_train) - 1)
+    exog_oos = exog_all.iloc[len(y_train):].values
+    pred_oos = arimax_model.predict(start=len(y_train), end=len(y_all) - 1, exog=exog_oos)
+    pred_arimax_all = pd.Series(np.concatenate([pred_in, pred_oos]), index=y_all.index)
+    pred_arimax_test = pd.Series(pred_arimax_all.loc[test_df.index].values, index=test_df.index)
+
+    true_residuals = y_all - pred_arimax_all
+    mlp_features = pd.DataFrame(index=y_all.index)
+    mlp_features["X1_t"] = exog_all[CARBON_TICKER]
+    mlp_features["X1_t_minus_1"] = exog_all[CARBON_TICKER].shift(1)
+    mlp_features["X3_t"] = exog_all[FX_TICKER]
+    mlp_features["X3_t_minus_1"] = exog_all[FX_TICKER].shift(1)
+    mlp_features["e_t_minus_1"] = true_residuals.shift(1)
+    mlp_features["e_t_minus_2"] = true_residuals.shift(2)
+
+    mlp_df = pd.concat([mlp_features, true_residuals.rename("Target_Residual")], axis=1).dropna()
+    mlp_train = mlp_df.loc[mlp_df.index.isin(train_df.index)]
+    mlp_val = mlp_df.loc[mlp_df.index.isin(val_df.index)]
+    mlp_test = mlp_df.loc[mlp_df.index.isin(test_df.index)]
+    if mlp_train.empty or mlp_val.empty or mlp_test.empty:
+        raise ValueError("MLP için yeterli gözlem yok")
+
+    X_mlp_train = mlp_train.drop(columns="Target_Residual")
+    y_mlp_train = mlp_train["Target_Residual"]
+    X_mlp_val = mlp_val.drop(columns="Target_Residual")
+    y_mlp_val = mlp_val["Target_Residual"]
+    X_mlp_test = mlp_test.drop(columns="Target_Residual")
+
+    scaler_X = MinMaxScaler()
+    X_mlp_train_sc = scaler_X.fit_transform(X_mlp_train)
+    X_mlp_val_sc = scaler_X.transform(X_mlp_val)
+    X_mlp_test_sc = scaler_X.transform(X_mlp_test)
+
+    tf.keras.utils.set_random_seed(7)
+    model_mlp = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(shape=(X_mlp_train_sc.shape[1],)),
+            tf.keras.layers.Dense(64, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(32, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(16, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(1, activation="linear"),
+        ]
+    )
+    model_mlp.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.01), loss=tf.keras.losses.Huber(delta=0.05))
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
+    model_mlp.fit(
+        X_mlp_train_sc,
+        y_mlp_train.values,
+        validation_data=(X_mlp_val_sc, y_mlp_val.values),
+        epochs=200,
+        batch_size=8,
+        callbacks=[early_stopping],
+        verbose=0,
+    )
+
+    mlp_pred_resid = pd.Series(model_mlp.predict(X_mlp_test_sc, verbose=0).ravel(), index=mlp_test.index)
+    pred_hybrid_test = pred_arimax_test.loc[mlp_test.index] + mlp_pred_resid
+    y_test_final = test_df[target_ticker].loc[pred_hybrid_test.index]
+    if y_test_final.empty:
+        raise ValueError("Test kümesinde eşleşen gözlem yok")
+
+    rmse = float(np.sqrt(mean_squared_error(y_test_final, pred_hybrid_test)))
+    mae = float(mean_absolute_error(y_test_final, pred_hybrid_test))
+    return {"RMSE": rmse, "MAE": mae, "Test Gözlem": int(len(y_test_final))}
+
+
+def run_robust_test_for_stocks(stocks: List[str]) -> pd.DataFrame:
+    rows = []
+    for stock in stocks:
+        ticker = stock if "." in stock else f"{stock}.IS"
+        try:
+            result = run_single_ticker_hybrid_test(ticker)
+            rows.append(
+                {
+                    "Hisse": stock,
+                    "Model": "Hibrit ARIMAX-MLP",
+                    "RMSE": result["RMSE"],
+                    "MAE": result["MAE"],
+                    "Test Gözlem": result["Test Gözlem"],
+                    "Durum": "Başarılı",
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "Hisse": stock,
+                    "Model": "Hibrit ARIMAX-MLP",
+                    "RMSE": np.nan,
+                    "MAE": np.nan,
+                    "Test Gözlem": 0,
+                    "Durum": f"Hata: {exc}",
+                }
+            )
+    return pd.DataFrame(rows)
 
 def get_log_returns(df: pd.DataFrame):
     return np.log(df / df.shift(1)).dropna()
@@ -373,6 +493,15 @@ def run_pipeline():
     plot_all_visualizations(y_test_final, predictions_df, metrics_df, hybrid_resid, xgb_resid)
     
     write_thesis_report(raw_stats, raw_corr, ret_stats, adf_res, arimax_summary, arimax_coef, diag_df, metrics_df, stress_df)
+
+    print("\n=== 6. Robust Test (AKCNS, TUPRS, KRDMD) ===")
+    robust_df = run_robust_test_for_stocks(ROBUST_TEST_TICKERS)
+    print(robust_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+    Path("Robust_Test_Sonuclari.txt").write_text(
+        robust_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"),
+        encoding="utf-8",
+    )
+    print("Robust test raporu oluşturuldu: Robust_Test_Sonuclari.txt")
 
 if __name__ == "__main__":
     run_pipeline()
