@@ -29,10 +29,16 @@ sns.set_style("whitegrid")
 
 # --- KÜRESEL DEĞİŞKENLER ---
 TARGET_TICKER = "EREGL.IS"
+EXOGENOUS_MAP = {
+    "EREGL.IS": ["KEUA", "TIO=F", "USDTRY=X"],
+    "ISDMR.IS": ["KEUA", "TIO=F", "USDTRY=X"],
+    "KRDMD.IS": ["KEUA", "SLX", "USDTRY=X"],
+    "TUPRS.IS": ["KEUA", "BZ=F", "USDTRY=X"],
+    "AKCNS.IS": ["KEUA", "NG=F", "USDTRY=X"],
+}
 CARBON_TICKER = "KEUA"
-IRON_TICKER = "TIO=F"
 FX_TICKER = "USDTRY=X"
-ROBUST_TEST_TICKERS = ["ISDMR", "KRDMD", "AKCNS"]
+ROBUST_TEST_TICKERS = ["ISDMR", "KRDMD", "TUPRS"]
 
 MODEL_COLORS = {
     "Baseline (OLS)": "#6c7a89",
@@ -49,7 +55,10 @@ STRESS_BANDS = {"S1 (+%30)": 0.30, "S2 (+%60)": 0.60, "S3 (+%100)": 1.00}
 # 1. VERİ ÇEKME VE HAZIRLIK
 # ==========================================
 def fetch_and_clean_data(target_ticker: str = TARGET_TICKER) -> pd.DataFrame:
-    tickers = [target_ticker, CARBON_TICKER, IRON_TICKER, FX_TICKER]
+
+    exog_cols = EXOGENOUS_MAP[target_ticker]
+
+    tickers = [target_ticker] + exog_cols
     raw = yf.download(
         tickers=tickers,
         start="2023-10-01",
@@ -82,7 +91,12 @@ def run_single_ticker_all_models_test(target_ticker: str) -> pd.DataFrame:
     train_df, val_df, test_df = strict_data_split(df_returns)
 
     y_all = df_returns[target_ticker]
-    exog_all = df_returns[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+    exog_cols = EXOGENOUS_MAP[target_ticker]
+    exog_all = df_returns[exog_cols]
+    carbon_col = exog_cols[0]
+    commodity_col = exog_cols[1]
+    fx_col = exog_cols[2]
+    
 
     y_train = train_df[target_ticker]
     exog_train = train_df[exog_all.columns]
@@ -144,15 +158,17 @@ def run_single_ticker_all_models_test(target_ticker: str) -> pd.DataFrame:
 
     mlp_features = pd.DataFrame(index=y_all.index)
 
-    mlp_features["X1_t"] = exog_all[CARBON_TICKER]
-    mlp_features["X1_t_minus_1"] = exog_all[CARBON_TICKER].shift(1)
+    # CARBON
+    mlp_features["carbon_t"] = exog_all[carbon_col]
+    mlp_features["carbon_t_minus_1"] = exog_all[carbon_col].shift(1)
 
-    mlp_features["X3_t"] = exog_all[FX_TICKER]
-    mlp_features["X3_t_minus_1"] = exog_all[FX_TICKER].shift(1)
+    # FX
+    mlp_features["fx_t"] = exog_all[fx_col]
+    mlp_features["fx_t_minus_1"] = exog_all[fx_col].shift(1)
 
+    # RESIDUAL LAGS
     mlp_features["e_t_minus_1"] = true_residuals.shift(1)
     mlp_features["e_t_minus_2"] = true_residuals.shift(2)
-
     mlp_df = pd.concat(
         [mlp_features, true_residuals.rename("Target_Residual")], axis=1
     ).dropna()
@@ -674,7 +690,14 @@ def run_pipeline():
 
     train_df, val_df, test_df = strict_data_split(df_returns)
     y_all = df_returns[TARGET_TICKER]
-    exog_all = df_returns[[CARBON_TICKER, IRON_TICKER, FX_TICKER]]
+
+    exog_cols = EXOGENOUS_MAP[TARGET_TICKER]
+
+    CARBON_TICKER = exog_cols[0]
+    COMMODITY_TICKER = exog_cols[1]
+    FX_TICKER = exog_cols[2]
+
+    exog_all = df_returns[exog_cols]
 
     y_train = train_df[TARGET_TICKER]
     exog_train = train_df[exog_all.columns]

@@ -1,0 +1,16 @@
+Hisse             Model     RMSE      MAE  Test Gözlem    Durum
+ISDMR Hibrit ARIMAX-MLP 0.024139 0.017721           69 Başarılı
+ISDMR           XGBoost 0.024229 0.017906           69 Başarılı
+ISDMR            ARIMAX 0.024327 0.017675           69 Başarılı
+ISDMR    Baseline (OLS) 0.024343 0.017734           69 Başarılı
+ISDMR              LSTM 0.024461 0.017826           69 Başarılı
+KRDMD Hibrit ARIMAX-MLP 0.027481 0.020656           69 Başarılı
+KRDMD            ARIMAX 0.027629 0.020684           69 Başarılı
+KRDMD    Baseline (OLS) 0.027690 0.020744           69 Başarılı
+KRDMD           XGBoost 0.028028 0.021068           69 Başarılı
+KRDMD              LSTM 0.029776 0.022260           69 Başarılı
+TUPRS Hibrit ARIMAX-MLP 0.022550 0.017295           69 Başarılı
+TUPRS    Baseline (OLS) 0.022583 0.017229           69 Başarılı
+TUPRS            ARIMAX 0.022646 0.017255           69 Başarılı
+TUPRS              LSTM 0.023751 0.018062           69 Başarılı
+TUPRS           XGBoost 0.025323 0.019663           69 Başarılı
